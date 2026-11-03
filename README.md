@@ -59,6 +59,26 @@ pnpm exec midscene-test model verify
 .venv/Scripts/python server/ingest.py
 ```
 
+## 运行控制接口
+
+服务起来后可以直接用 HTTP 触发运行，不必开终端：
+
+| 接口 | 作用 |
+|---|---|
+| `POST /api/runs` | 起一次运行，body `{project, files: [], clean}`；`files` 为空则跑整个套件 |
+| `GET /api/runs/{id}/events` | SSE 实时日志，`?from=<seq>` 可断线重连回放 |
+| `GET /api/runs/{id}/log` | 轮询式取日志（SSE 的兜底） |
+| `POST /api/runs/{id}/cancel` | 取消：排队中直接出队，运行中杀整棵进程树 |
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/runs \
+  -H 'Content-Type: application/json' \
+  -d '{"project":"smoke","files":["games/douyin/edge-space/smoke/02-inventory-open.yaml"]}'
+```
+
+单执行槽：一台真机同时只跑一个任务，最多排队 3 个，再多返回 `409`。
+取消运行中的任务会连 `codely` 子进程一起杀掉（Windows 用 `taskkill /T`），不会留孤儿。
+
 ## 目录结构
 
 ```

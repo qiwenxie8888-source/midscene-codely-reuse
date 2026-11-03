@@ -1,29 +1,37 @@
-"""只读 API：把 smoke.db 里的运行结果暴露成 HTTP 接口。
+"""运行看板 API：读库 + 触发/观测/取消测试运行。
 
 启动（在项目根目录执行）：
   .venv/Scripts/python -m uvicorn server.api:app --reload --port 8000
 
 接口：
-  GET /                    接口清单
-  GET /api/health          库是否可用 + 数据量
-  GET /api/runs            运行历史（可按 game / suite / status 过滤）
-  GET /api/runs/{run_id}   单次运行明细（含用例列表与报告链接）
-  GET /api/games           游戏清单 + 各自最近一次运行
-  GET /api/stats           按天统计的通过情况
-  GET /reports/...         Midscene 原生 HTML 报告（静态挂载）
+  GET  /                    页面（运行历史）
+  GET  /api/health          库是否可用 + 数据量 + 当前执行态
+  GET  /api/runs            运行历史（可按 game / suite / status 过滤）
+  GET  /api/runs/{run_id}   单次运行明细（含用例列表与报告链接）
+  POST /api/runs            起一次测试运行（排队执行）
+  GET  /api/runs/{id}/events  SSE 实时日志（支持 from 序号回放）
+  GET  /api/runs/{id}/log   轮询式取日志（SSE 的兜底）
+  POST /api/runs/{id}/cancel 取消（排队中出队，运行中杀进程树）
+  GET  /api/games           游戏清单 + 各自最近一次运行
+  GET  /api/stats           按天统计的通过情况
+  GET  /reports/...         Midscene 原生 HTML 报告（静态挂载）
 
-本层只读：不改库、不跑测试、不调模型。
+读库部分只读；只有 POST /api/runs 会真的启动测试进程。
 """
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
+
+from .runner import BusyError, runner
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DB_PATH = PROJECT_ROOT / "server" / "data" / "smoke.db"
@@ -81,6 +89,10 @@ def api_index() -> dict[str, Any]:
             "/api/health",
             "/api/runs?game=&suite=&status=&limit=50",
             "/api/runs/{run_id}",
+            "POST /api/runs",
+            "/api/runs/{run_id}/events?from=0",
+            "/api/runs/{run_id}/log?from=0",
+            "POST /api/runs/{run_id}/cancel",
             "/api/games",
             "/api/stats?game=&days=30",
             "/api/analytics/trend?days=30",
@@ -108,6 +120,7 @@ def health() -> dict[str, Any]:
         "cases": cases,
         "report_root": str(REPORT_ROOT),
         "report_root_exists": REPORT_ROOT.exists(),
+        "runner": runner.snapshot(),
     }
 
 
@@ -488,6 +501,111 @@ def analytics_distribution(
     finally:
         conn.close()
     return {"days": days, "items": items}
+
+
+# ---------------------------------------------------------------- 运行控制
+# 单执行槽：一台真机同时只能跑一个任务，多出来的排队（上限见 runner.MAX_QUEUE）
+
+
+class StartRunRequest(BaseModel):
+    """起一次运行。files 为空表示跑整个 project。"""
+
+    project: str = "smoke"
+    files: list[str] = []
+    clean: bool = True
+
+
+def _resolve_case_files(files: list[str]) -> list[str]:
+    """只接受项目内的 YAML，避免接口被用来读任意路径。"""
+    resolved: list[str] = []
+    for item in files:
+        candidate = Path(item)
+        path = (candidate if candidate.is_absolute() else PROJECT_ROOT / candidate).resolve()
+        try:
+            relative = path.relative_to(PROJECT_ROOT)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=f"路径不在项目内：{item}") from error
+        if path.suffix.lower() not in (".yaml", ".yml"):
+            raise HTTPException(status_code=400, detail=f"只支持 YAML 用例文件：{item}")
+        if not path.is_file():
+            raise HTTPException(status_code=400, detail=f"文件不存在：{item}")
+        resolved.append(relative.as_posix())
+    return resolved
+
+
+@app.post("/api/runs", status_code=201)
+def start_run(payload: StartRunRequest) -> dict[str, Any]:
+    """起一次测试运行。立即返回 run_id，日志走 /events 或 /log 取。"""
+    if payload.project not in ("smoke", "explore"):
+        raise HTTPException(status_code=400, detail=f"未知套件：{payload.project}")
+    files = _resolve_case_files(payload.files)
+    try:
+        job = runner.start(payload.project, files, payload.clean)
+    except BusyError as error:
+        snapshot = runner.snapshot()
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": str(error),
+                "running_run_id": (snapshot["running"] or {}).get("run_id"),
+                "queue_depth": snapshot["queue_depth"],
+            },
+        ) from error
+    return job.to_dict()
+
+
+@app.get("/api/runs/{run_id}/events")
+def stream_run_events(
+    run_id: str,
+    from_seq: int = Query(0, alias="from", ge=0, description="从哪个序号开始补历史"),
+) -> StreamingResponse:
+    """SSE 实时日志。断线重连带 from 就能补回历史，不会丢前面的行。"""
+    if runner.get(run_id) is None:
+        raise HTTPException(status_code=404, detail=f"任务不存在：{run_id}")
+
+    def generate():
+        try:
+            for seq, event in runner.iter_events(run_id, from_seq):
+                if event.get("type") == "heartbeat":
+                    # SSE 注释行，只为保活，客户端会忽略
+                    yield ": ping\n\n"
+                    continue
+                payload = json.dumps(event, ensure_ascii=False)
+                yield f"id: {seq}\nevent: {event['type']}\ndata: {payload}\n\n"
+        except GeneratorExit:
+            return
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.get("/api/runs/{run_id}/log")
+def run_log(
+    run_id: str,
+    from_seq: int = Query(0, alias="from", ge=0),
+) -> dict[str, Any]:
+    """轮询式取日志：SSE 不可用或被中间层掐断时的兜底。"""
+    try:
+        items, last_seq, status = runner.log_slice(run_id, from_seq)
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail=f"任务不存在：{run_id}") from error
+    return {"items": items, "next": last_seq, "status": status}
+
+
+@app.post("/api/runs/{run_id}/cancel")
+def cancel_run(run_id: str) -> dict[str, Any]:
+    """取消：排队中直接出队；运行中杀进程树（含 codely 子进程）。"""
+    try:
+        was = runner.cancel(run_id)
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail=f"任务不存在：{run_id}") from error
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    job = runner.get(run_id)
+    return {"run_id": run_id, "was": was, "status": job.status if job else "unknown"}
 
 
 if REPORT_ROOT.exists():
