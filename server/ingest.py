@@ -111,8 +111,33 @@ def ensure_columns(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE cases ADD COLUMN {name} {ddl}")
 
 
-def classify(source_path: str) -> tuple[str | None, str | None]:
-    """从用例文件路径反推 (game_key, suite)。旧布局返回 (None, suite)。"""
+def build_case_file_index() -> dict[str, set[tuple[str, str]]]:
+    """文件名 -> {(game_key, suite)}。
+
+    单文件模式（`midscene-test <某个.yaml>`）下 summary 里的 sourcePath 只剩文件名，
+    路径信息丢失，只能靠文件名反查它属于哪个渠道/游戏/用例集。
+    """
+    index: dict[str, set[tuple[str, str]]] = {}
+    games_root = PROJECT_ROOT / "games"
+    if not games_root.exists():
+        return index
+    for path in games_root.glob("*/*/*/*.yaml"):
+        parts = path.relative_to(PROJECT_ROOT).parts
+        if len(parts) != 5:  # games/<渠道>/<游戏>/<用例集>/<文件>
+            continue
+        _, channel, game, suite, name = parts
+        index.setdefault(name, set()).add((f"{channel}/{game}", suite))
+    return index
+
+
+CASE_FILE_INDEX: dict[str, set[tuple[str, str]]] = build_case_file_index()
+
+
+def classify(
+    source_path: str,
+    index: dict[str, set[tuple[str, str]]] | None = None,
+) -> tuple[str | None, str | None]:
+    """从用例文件路径反推 (game_key, suite)。解析不出就返回 None，绝不猜。"""
     match = GAME_PATH.match(source_path)
     if match:
         channel, game, suite = match.groups()
@@ -120,6 +145,11 @@ def classify(source_path: str) -> tuple[str | None, str | None]:
     match = LEGACY_PATH.match(source_path)
     if match:
         return None, match.group(1)
+    # 单文件模式：sourcePath 只剩文件名，用文件索引反查；同名文件分属多个游戏时不猜
+    if "/" not in source_path and "\\" not in source_path:
+        candidates = (index if index is not None else CASE_FILE_INDEX).get(source_path)
+        if candidates and len(candidates) == 1:
+            return next(iter(candidates))
     return None, None
 
 
