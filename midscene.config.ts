@@ -4,7 +4,7 @@ import type { NodeExecutionContext } from '@midscene/test';
 import { defineProjectSetup, defineTestProject } from '@midscene/test/config';
 import { createMidsceneNodes } from '@midscene/test/midscene';
 import { AndroidAgent, agentFromAdbDevice } from '@midscene/android';
-import { gameEnter } from './scripts/game-enter-node';
+import { gameEnter, gameEnsure } from './scripts/game-enter-node';
 import type { ProjectContext } from './scripts/context';
 
 loadEnv({ path: fileURLToPath(new URL('.env', import.meta.url)) });
@@ -41,5 +41,9 @@ export default defineTestProject<ProjectContext>({
   nodes: [
     ...createMidsceneNodes<ProjectContext>({ agentClass: AndroidAgent, getAgent }),
     gameEnter,
+    gameEnsure,
   ],
+  // Codely ACP 为每次模型调用新起一个 codely 进程，首个 AI 调用实测可达 70~170s，
+  // 默认 120s 的单步超时会把 game.enter 直接打断。
+  test: { testTimeout: 600_000 },
 });

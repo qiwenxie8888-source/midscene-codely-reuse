@@ -67,6 +67,11 @@ def index() -> FileResponse:
     return FileResponse(WEB_ROOT / "index.html")
 
 
+@app.get("/analytics", include_in_schema=False)
+def analytics_page() -> FileResponse:
+    return FileResponse(WEB_ROOT / "analytics.html")
+
+
 @app.get("/api")
 def api_index() -> dict[str, Any]:
     return {
@@ -78,6 +83,11 @@ def api_index() -> dict[str, Any]:
             "/api/runs/{run_id}",
             "/api/games",
             "/api/stats?game=&days=30",
+            "/api/analytics/trend?days=30",
+            "/api/analytics/failures?days=30&limit=10",
+            "/api/analytics/matrix?limit=10",
+            "/api/analytics/compare?a=&b=",
+            "/api/analytics/distribution?days=30",
             "/reports/...",
         ],
     }
@@ -160,7 +170,8 @@ def get_run(run_id: str) -> dict[str, Any]:
         run = dict(row)
         cases = to_list(
             conn.execute(
-                "SELECT id, project, suite, game_key, source_path, case_index, name, status, attempts "
+                "SELECT id, project, suite, game_key, source_path, case_index, name, status, attempts, "
+                "duration_ms, failed_node, failed_phase, error_code, error_message "
                 "FROM cases WHERE run_id = ? ORDER BY case_index, id",
                 (run_id,),
             )
@@ -252,6 +263,231 @@ def stats(
     finally:
         conn.close()
     return {"days": days, "since": since, "game": game, "items": items}
+
+
+def _since(days: int) -> str:
+    return (date.today() - timedelta(days=days - 1)).isoformat()
+
+
+def _scope(tables: str, days: int, game: str | None, suite: str | None):
+    """拼 days / game / suite 三种过滤条件，返回 (WHERE 片段, 参数)。"""
+    where = ["r.started_at >= :since"]
+    params: dict[str, Any] = {"since": _since(days)}
+    if game:
+        where.append(f"c.game_key = :game")
+        params["game"] = game
+    if suite:
+        where.append(f"c.suite = :suite")
+        params["suite"] = suite
+    return " AND ".join(where), params
+
+
+@app.get("/api/analytics/trend")
+def analytics_trend(
+    days: int = Query(30, ge=1, le=365),
+    game: str | None = Query(None),
+    suite: str | None = Query(None),
+) -> dict[str, Any]:
+    """按天统计用例级通过率与平均耗时。"""
+    where, params = _scope("c JOIN runs r ON r.run_id = c.run_id", days, game, suite)
+    sql = f"""
+        SELECT substr(r.started_at, 1, 10) AS day,
+               sum(CASE WHEN c.status = 'success' THEN 1 ELSE 0 END) AS passed,
+               sum(CASE WHEN c.status = 'failed' THEN 1 ELSE 0 END) AS failed,
+               cast(avg(c.duration_ms) AS INTEGER) AS avg_case_ms
+        FROM cases c JOIN runs r ON r.run_id = c.run_id
+        WHERE {where}
+        GROUP BY day
+        ORDER BY day
+    """
+    conn = connect()
+    try:
+        items = to_list(conn.execute(sql, params))
+    finally:
+        conn.close()
+    for item in items:
+        done = (item["passed"] or 0) + (item["failed"] or 0)
+        item["pass_rate"] = round((item["passed"] or 0) / done, 3) if done else None
+    return {"days": days, "items": items}
+
+
+@app.get("/api/analytics/failures")
+def analytics_failures(
+    days: int = Query(30, ge=1, le=365),
+    game: str | None = Query(None),
+    suite: str | None = Query(None),
+    limit: int = Query(10, ge=1, le=100),
+) -> dict[str, Any]:
+    """失败用例排行，附带最常见的失败节点与错误码。"""
+    where, params = _scope("c JOIN runs r ON r.run_id = c.run_id", days, game, suite)
+    sql = f"""
+        SELECT c.name,
+               c.suite,
+               c.game_key,
+               count(*) AS failures,
+               group_concat(DISTINCT c.error_code) AS error_codes,
+               group_concat(DISTINCT c.failed_node) AS failed_nodes,
+               max(r.started_at) AS last_failed_at
+        FROM cases c JOIN runs r ON r.run_id = c.run_id
+        WHERE {where} AND c.status = 'failed'
+        GROUP BY c.name
+        ORDER BY failures DESC
+        LIMIT :limit
+    """
+    params["limit"] = limit
+    conn = connect()
+    try:
+        items = to_list(conn.execute(sql, params))
+        for item in items:
+            row = conn.execute(
+                """
+                SELECT error_message FROM cases
+                WHERE name = ? AND error_message IS NOT NULL
+                ORDER BY id DESC LIMIT 1
+                """,
+                (item["name"],),
+            ).fetchone()
+            item["last_error_message"] = row[0] if row else None
+    finally:
+        conn.close()
+    return {"days": days, "count": len(items), "items": items}
+
+
+@app.get("/api/analytics/matrix")
+def analytics_matrix(
+    limit: int = Query(10, ge=1, le=50),
+    game: str | None = Query(None),
+) -> dict[str, Any]:
+    """用例稳定性矩阵：行=用例，列=最近 N 次运行。"""
+    conn = connect()
+    try:
+        run_sql = "SELECT run_id, started_at, status FROM runs"
+        params: dict[str, Any] = {"limit": limit}
+        if game:
+            run_sql += " WHERE EXISTS (SELECT 1 FROM cases c WHERE c.run_id = runs.run_id AND c.game_key = :game)"
+            params["game"] = game
+        run_sql += " ORDER BY started_at DESC LIMIT :limit"
+        runs = to_list(conn.execute(run_sql, params))
+        if not runs:
+            return {"runs": [], "rows": []}
+
+        placeholders = ",".join("?" for _ in runs)
+        case_rows = to_list(
+            conn.execute(
+                f"""
+                SELECT run_id, name, suite, game_key, status, error_code
+                FROM cases WHERE run_id IN ({placeholders})
+                """,
+                tuple(run["run_id"] for run in runs),
+            )
+        )
+    finally:
+        conn.close()
+
+    order = [run["run_id"] for run in runs]
+    table: dict[str, dict[str, Any]] = {}
+    for row in case_rows:
+        entry = table.setdefault(
+            row["name"],
+            {
+                "name": row["name"],
+                "suite": row["suite"],
+                "game_key": row["game_key"],
+                "cells": {},
+                "failures": 0,
+            },
+        )
+        entry["cells"][row["run_id"]] = {"status": row["status"], "error_code": row["error_code"]}
+        if row["status"] == "failed":
+            entry["failures"] += 1
+
+    rows = sorted(table.values(), key=lambda item: (-item["failures"], item["name"]))
+    for row in rows:
+        row["cells"] = [row["cells"].get(run_id) for run_id in order]
+
+    return {"runs": runs, "rows": rows}
+
+
+@app.get("/api/analytics/compare")
+def analytics_compare(
+    a: str = Query(..., description="基准运行（较早）"),
+    b: str = Query(..., description="对比运行（较新）"),
+) -> dict[str, Any]:
+    """对比两次运行：新增失败 / 新增通过 / 仍然失败。"""
+    conn = connect()
+    try:
+        def statuses(run_id: str) -> dict[str, dict[str, Any]]:
+            rows = conn.execute(
+                "SELECT source_path, case_index, name, status, error_code, duration_ms "
+                "FROM cases WHERE run_id = ?",
+                (run_id,),
+            )
+            return {
+                f"{row[0]}#{row[1]}": {
+                    "name": row[2],
+                    "status": row[3],
+                    "error_code": row[4],
+                    "duration_ms": row[5],
+                }
+                for row in rows
+            }
+
+        before, after = statuses(a), statuses(b)
+    finally:
+        conn.close()
+
+    newly_failed, newly_passed, still_failed, not_run = [], [], [], []
+    for key, later in after.items():
+        earlier = before.get(key)
+        earlier_status = earlier["status"] if earlier else None
+        if later["status"] == "failed":
+            if earlier_status == "failed":
+                still_failed.append({**later, "key": key, "before": earlier_status})
+            else:
+                newly_failed.append({**later, "key": key, "before": earlier_status})
+        elif later["status"] == "success" and earlier_status == "failed":
+            newly_passed.append({**later, "key": key, "before": earlier_status})
+        elif later["status"] == "not-run":
+            not_run.append({**later, "key": key, "before": earlier_status})
+
+    return {
+        "a": a,
+        "b": b,
+        "counts": {
+            "newly_failed": len(newly_failed),
+            "newly_passed": len(newly_passed),
+            "still_failed": len(still_failed),
+            "not_run": len(not_run),
+        },
+        "newly_failed": newly_failed,
+        "newly_passed": newly_passed,
+        "still_failed": still_failed,
+        "not_run": not_run,
+    }
+
+
+@app.get("/api/analytics/distribution")
+def analytics_distribution(
+    days: int = Query(30, ge=1, le=365),
+) -> dict[str, Any]:
+    """按游戏 / 用例集统计通过失败分布。"""
+    where, params = _scope("c JOIN runs r ON r.run_id = c.run_id", days, None, None)
+    sql = f"""
+        SELECT coalesce(c.game_key, '(未关联)') AS game_key,
+               coalesce(c.suite, '(未知)') AS suite,
+               sum(CASE WHEN c.status = 'success' THEN 1 ELSE 0 END) AS passed,
+               sum(CASE WHEN c.status = 'failed' THEN 1 ELSE 0 END) AS failed
+        FROM cases c JOIN runs r ON r.run_id = c.run_id
+        WHERE {where} AND c.status IN ('success', 'failed')
+        GROUP BY game_key, suite
+        ORDER BY failed DESC
+    """
+    conn = connect()
+    try:
+        items = to_list(conn.execute(sql, params))
+    finally:
+        conn.close()
+    return {"days": days, "items": items}
 
 
 if REPORT_ROOT.exists():

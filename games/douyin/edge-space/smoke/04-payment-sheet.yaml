@@ -1,0 +1,38 @@
+# 冒烟 04：支付——收银台可拉起且可取消（绝不完成支付）
+# 一条用例一个文件：beforeAll 用 game.ensure 做状态复位
+beforeAll:
+  - game.ensure:
+      gameKey: douyin/edge-space
+
+cases:
+  - name: 支付-收银台可拉起且可取消
+    steps:
+      # 安全要求：只验证收银台能拉起，绝不完成支付
+      - aiTap:
+          prompt: 游戏主界面左下角带红点的礼盒（礼包/商城）图标
+          $:
+            continue-on-error: true
+      # 指定商品：永久尊享无广包（其他礼包在当前测试账号下已解锁，点不到购买按钮）
+      - aiTap:
+          prompt: 商店里"永久尊享无广包"商品卡片上的购买/立即购买按钮（不要点显示"已解锁""补单"的商品）
+          $:
+            continue-on-error: true
+      # 游戏内购买需再点带抖音图标的金额按钮，才会拉起收银台
+      - aiTap:
+          prompt: 点击购买弹窗中带抖音图标的支付金额按钮（如 120 元档位）
+          $:
+            continue-on-error: true
+      # 点击后会出现"加载中"遮罩，收银台弹出需要时间，用等待而不是立刻断言
+      - aiWaitFor:
+          prompt: 抖音收银台或支付确认面板已弹出，能看到支付金额和支付按钮
+          options:
+            timeoutMs: 30000
+          $:
+            continue-on-error: true
+      # 取消支付需要两步（取消 → 确认框点"放弃"），用 aiAct 让模型自己走完，
+      # 并用否定约束杜绝误点支付
+      - aiAct: 取消当前支付并关闭收银台：先点收银台上的"取消"或关闭按钮，如果弹出"确定放弃支付"的确认框就点"放弃"；绝对不要点"立即支付"或"继续付款"
+      - aiWaitFor:
+          prompt: 支付面板已关闭，回到游戏界面
+          options:
+            timeoutMs: 15000

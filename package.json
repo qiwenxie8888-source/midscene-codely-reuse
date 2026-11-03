@@ -12,14 +12,15 @@
     "postinstall": "midscene-test nodes",
     "validate": "node scripts/validate-cases.mjs",
     "smoke:full": "node scripts/run-full.mjs --project smoke",
-    "explore:full": "node scripts/run-full.mjs --project explore"
+    "explore:full": "node scripts/run-full.mjs --project explore",
+    "cleanup:codely": "node scripts/cleanup-codely.mjs"
   },
   "engines": {
     "node": "^20.19.0 || ^22.12.0 || >=24.0.0"
   },
   "devDependencies": {
-    "@midscene/test": "1.15.2",
-    "@midscene/android": "1.15.2",
+    "@midscene/test": "link:C:/midscene-fix/packages/test",
+    "@midscene/android": "link:C:/midscene-fix/packages/android",
     "@types/node": "^20.0.0",
     "dotenv": "^16.4.5",
     "typescript": "^5.8.3"

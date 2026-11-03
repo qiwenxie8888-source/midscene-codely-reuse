@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>结果分析 · game-smoke</title>
+    <link rel="stylesheet" href="/static/style.css" />
+  </head>
+  <body>
+    <div class="page">
+      <header>
+        <div>
+          <h1>结果分析</h1>
+          <p class="sub">趋势、失败分布、用例稳定性与运行对比</p>
+        </div>
+        <nav class="nav">
+          <a href="/">运行看板</a>
+          <a href="/analytics" class="active">结果分析</a>
+        </nav>
+      </header>
+
+      <div class="section-head">
+        <h2>范围</h2>
+        <div class="filters">
+          <select id="days" aria-label="时间范围">
+            <option value="7">最近 7 天</option>
+            <option value="30" selected>最近 30 天</option>
+            <option value="90">最近 90 天</option>
+            <option value="365">最近一年</option>
+          </select>
+          <select id="game" aria-label="游戏"><option value="">全部游戏</option></select>
+          <select id="suite" aria-label="用例集">
+            <option value="">全部用例集</option>
+            <option value="smoke">smoke</option>
+            <option value="explore">explore</option>
+          </select>
+          <button id="apply" class="btn" type="button">应用</button>
+        </div>
+      </div>
+
+      <section class="panel">
+        <h3>通过率趋势</h3>
+        <div id="trend" class="chart"><div class="placeholder">加载中…</div></div>
+      </section>
+
+      <section class="panel">
+        <h3>平均耗时趋势</h3>
+        <div id="duration" class="chart"><div class="placeholder">加载中…</div></div>
+      </section>
+
+      <section class="panel">
+        <h3>失败用例排行</h3>
+        <div id="failures" class="list"><div class="placeholder">加载中…</div></div>
+      </section>
+
+      <section class="panel">
+        <h3>用例稳定性矩阵</h3>
+        <p class="hint">每列是一次运行（左新右旧），绿色=通过、红色=失败、黄色=未跑、灰色=无记录</p>
+        <div id="matrix" class="matrix"><div class="placeholder">加载中…</div></div>
+      </section>
+
+      <section class="panel">
+        <h3>运行对比</h3>
+        <div class="filters compare-picker">
+          <select id="run-a" aria-label="基准运行"><option value="">基准（较早）</option></select>
+          <select id="run-b" aria-label="对比运行"><option value="">对比（较新）</option></select>
+          <button id="compare" class="btn" type="button">对比</button>
+        </div>
+        <div id="compare-result"><div class="placeholder">选择两次运行后点「对比」</div></div>
+      </section>
+
+      <section class="panel">
+        <h3>失败分布</h3>
+        <div id="distribution" class="list"><div class="placeholder">加载中…</div></div>
+      </section>
+    </div>
+
+    <script src="/static/analytics.js"></script>
+  </body>
+</html>

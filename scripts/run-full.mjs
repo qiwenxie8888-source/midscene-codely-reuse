@@ -43,6 +43,7 @@ function findPython() {
 // Node 在 Windows 上不允许直接 spawn .cmd（会报 EINVAL），
 // 所以不走 pnpm，直接用 node 执行 midscene-test 的 bin 入口
 const MIDSCENE_BIN = resolve(projectRoot, 'node_modules/@midscene/test/bin/midscene-test');
+const CODELY_CLEANUP = resolve(projectRoot, 'scripts/cleanup-codely.mjs');
 
 const python = findPython();
 
@@ -66,23 +67,30 @@ function step(label, command, commandArgs) {
 
 let testOk = true;
 if (!skipTest) {
-  testOk = step('1/3 跑测试（project=' + project + '）', process.execPath, [MIDSCENE_BIN, '--project', project]);
+  // 上一次若被强杀，会留下孤儿 codely 进程，先清掉再开跑
+  step('1/4 清理遗留 codely 进程', process.execPath, [CODELY_CLEANUP]);
+  testOk = step('2/4 跑测试（project=' + project + '）', process.execPath, [MIDSCENE_BIN, '--project', project]);
 } else {
   console.log('跳过测试（--skip-test）');
 }
 
 // 测试失败也继续入库：失败运行恰恰是最需要被记录和分析的
-const ingestOk = step('2/3 入库', python, [resolve(projectRoot, 'server/ingest.py')]);
+const ingestOk = step('3/4 入库', python, [resolve(projectRoot, 'server/ingest.py')]);
 
 let cleanOk = true;
 if (!noClean) {
-  cleanOk = step('3/3 清理散落报告', python, [
+  cleanOk = step('4/4 清理散落报告', python, [
     resolve(projectRoot, 'server/clean_runs.py'),
     '--purge-loose',
     '--yes',
   ]);
 } else {
   console.log('跳过清理（--no-clean），散落报告保留在 midscene_run/report/');
+}
+
+// 正常结束时本来就会关会话，这里兜底清理异常退出留下的孤儿
+if (!skipTest) {
+  step('收尾 清理 codely 残留', process.execPath, [CODELY_CLEANUP]);
 }
 
 console.log('');

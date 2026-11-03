@@ -1,0 +1,33 @@
+# 冒烟 03：存档——杀宿主后重进，存档仍在
+# 一条用例一个文件：开头 game.ensure 做状态复位，中途用 game.enter 强制重进
+beforeAll:
+  - game.ensure:
+      gameKey: douyin/edge-space
+
+cases:
+  - name: 存档-杀宿主延时重进存档仍在
+    steps:
+      # 前置：点一次"新游戏"进入游戏进度，让本地产生存档
+      # （不点的话主菜单"继续游戏"是灰的，后面会一直等不到）
+      # 用 aiAct 是因为点完可能还要点"开始/确认"，但用步骤级 timeout 兜住，
+      # 避免像之前那样跑满全局 600s
+      - aiAct:
+          prompt: 点击主菜单上的"新游戏"；如果随后出现"开始游戏""确认""继续"之类的按钮就点击它，直到进入游戏画面（不再是主菜单）
+          $:
+            timeout: 150000
+      # 给游戏足够时间走完开场/章节动画，并把进度写进本地存档
+      # （部分章节进场有较长过场，5s 不够，这里留 60s）
+      - wait:
+          duration: 60
+          unit: s
+      # 杀宿主，逼游戏走冷启动读档路径
+      - runAdbShell: am force-stop com.ss.android.ugc.aweme
+      - wait:
+          duration: 60
+          unit: s
+      # 这里必须用 game.enter 强制重进：game.ensure 会因"已在主菜单"而跳过，
+      # 但本用例的目的正是验证冷启动读档
+      - game.enter:
+          gameKey: douyin/edge-space
+      # 锚点=主菜单"继续游戏"按钮（存档存在的直接证据：进度丢了它就灰/消失）
+      - aiAssert: 重新进入后，主菜单上的"继续游戏"按钮存在且可以点击（存档未丢）

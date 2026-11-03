@@ -1,8 +1,12 @@
-"""把 Midscene Test 的运行产物登记进 SQLite（ingest）。
+r"""把 Midscene Test 的运行产物登记进 SQLite（ingest）。
 
-扫描 <result-dir>/*/summary.json，抽出运行级与用例级的几个字段写进两张表：
+扫描 <result-dir>/*/summary.json，抽出运行级与用例级的字段写进三张表：
   runs  —— 一次运行一行（时间、状态、通过/失败数、报告文件路径）
-  cases —— 一个用例一行（所属游戏、用例集、用例名、状态）
+  cases —— 一个用例一行（所属游戏、用例集、用例名、状态、失败原因、耗时）
+  games —— 游戏键与展示名（从 game.config.ts 里读 name）
+
+失败原因来自 attempts[].resultFile（每次尝试的步骤明细），提取：
+  失败节点、失败阶段、错误码、错误信息、用例耗时。
 
 幂等：同一个 run_id 重复导入会先删旧行再写新行，不会产生重复数据。
 不调用任何模型、不连设备，纯本地解析。
@@ -10,7 +14,7 @@
 用法：
   python server/ingest.py                     # 扫描 .midscene/test-results
   python server/ingest.py --dry-run           # 只统计，不写库
-  python server/ingest.py --result-dir D:\\x --db server\\data\\smoke.db
+  python server/ingest.py --result-dir D:\x --db server\data\smoke.db
 """
 from __future__ import annotations
 
@@ -68,12 +72,13 @@ CREATE TABLE IF NOT EXISTS cases (
   name        TEXT,
   status      TEXT,
   attempts    INTEGER,
+  duration_ms   INTEGER,
+  failed_node   TEXT,
+  failed_phase  TEXT,
+  error_code    TEXT,
+  error_message TEXT,
   UNIQUE (run_id, source_path, case_index)
 );
-
-CREATE INDEX IF NOT EXISTS idx_cases_run ON cases(run_id);
-CREATE INDEX IF NOT EXISTS idx_cases_game ON cases(game_key, status);
-CREATE INDEX IF NOT EXISTS idx_runs_started ON runs(started_at DESC);
 
 CREATE TABLE IF NOT EXISTS games (
   game_key     TEXT PRIMARY KEY,
@@ -83,7 +88,27 @@ CREATE TABLE IF NOT EXISTS games (
   config_file  TEXT,
   updated_at   TEXT
 );
+
+CREATE INDEX IF NOT EXISTS idx_cases_run ON cases(run_id);
+CREATE INDEX IF NOT EXISTS idx_cases_game ON cases(game_key, status);
+CREATE INDEX IF NOT EXISTS idx_runs_started ON runs(started_at DESC);
 """
+
+# 老库升级：缺列时补上，不动已有数据
+CASE_COLUMNS = [
+    ("duration_ms", "INTEGER"),
+    ("failed_node", "TEXT"),
+    ("failed_phase", "TEXT"),
+    ("error_code", "TEXT"),
+    ("error_message", "TEXT"),
+]
+
+
+def ensure_columns(conn: sqlite3.Connection) -> None:
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(cases)")}
+    for name, ddl in CASE_COLUMNS:
+        if name not in existing:
+            conn.execute(f"ALTER TABLE cases ADD COLUMN {name} {ddl}")
 
 
 def classify(source_path: str) -> tuple[str | None, str | None]:
@@ -96,6 +121,40 @@ def classify(source_path: str) -> tuple[str | None, str | None]:
     if match:
         return None, match.group(1)
     return None, None
+
+
+def read_failure(run_dir: Path, attempt: dict) -> dict:
+    """从 attempt 的 resultFile 里提取失败原因与耗时。取不到就返回空字典。"""
+    relative = attempt.get("resultFile")
+    if not relative:
+        return {}
+    path = run_dir / relative
+    try:
+        detail = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+    result: dict = {"duration_ms": detail.get("durationMs")}
+
+    # 依次找第一个失败的步骤；beforeEach 失败时 steps 通常是空的
+    for phase in ("beforeEach", "steps", "afterEach"):
+        failed = next(
+            (step for step in (detail.get(phase) or []) if step.get("status") == "failed"),
+            None,
+        )
+        if failed is None:
+            continue
+        error = failed.get("error") or {}
+        message = (error.get("message") or "").strip()
+        result.update(
+            failed_phase=phase,
+            failed_node=failed.get("node"),
+            error_code=error.get("code") or error.get("name"),
+            error_message=message[:500] or None,
+        )
+        break
+
+    return result
 
 
 def parse_summary(summary: dict, run_dir: Path) -> tuple[dict, list[dict]]:
@@ -117,6 +176,10 @@ def parse_summary(summary: dict, run_dir: Path) -> tuple[dict, list[dict]]:
                 suite = project_name
             if game_key:
                 games.add(game_key)
+
+            attempts = case.get("attempts") or []
+            failure = read_failure(run_dir, attempts[0]) if attempts else {}
+
             cases.append(
                 {
                     "project": project_name,
@@ -126,7 +189,12 @@ def parse_summary(summary: dict, run_dir: Path) -> tuple[dict, list[dict]]:
                     "case_index": case.get("caseIndex"),
                     "name": case.get("name"),
                     "status": case.get("status"),
-                    "attempts": len(case.get("attempts") or []),
+                    "attempts": len(attempts),
+                    "duration_ms": failure.get("duration_ms"),
+                    "failed_node": failure.get("failed_node"),
+                    "failed_phase": failure.get("failed_phase"),
+                    "error_code": failure.get("error_code"),
+                    "error_message": failure.get("error_message"),
                 }
             )
 
@@ -230,9 +298,11 @@ ON CONFLICT(run_id) DO UPDATE SET
 
 CASE_INSERT = """
 INSERT OR IGNORE INTO cases (
-  run_id, project, suite, game_key, source_path, case_index, name, status, attempts
+  run_id, project, suite, game_key, source_path, case_index, name, status, attempts,
+  duration_ms, failed_node, failed_phase, error_code, error_message
 ) VALUES (
-  :run_id, :project, :suite, :game_key, :source_path, :case_index, :name, :status, :attempts
+  :run_id, :project, :suite, :game_key, :source_path, :case_index, :name, :status, :attempts,
+  :duration_ms, :failed_node, :failed_phase, :error_code, :error_message
 )
 """
 
@@ -249,6 +319,7 @@ def ingest(result_dir: Path, db_path: Path, dry_run: bool) -> int:
         conn = sqlite3.connect(db_path)
         conn.execute("PRAGMA foreign_keys = ON")
         conn.executescript(SCHEMA)
+        ensure_columns(conn)
 
     ingested = skipped = 0
     discovered_games: set[str] = set()
@@ -268,10 +339,13 @@ def ingest(result_dir: Path, db_path: Path, dry_run: bool) -> int:
         discovered_games.update(
             case["game_key"] for case in cases if case["game_key"]
         )
+
+        failures = sum(1 for case in cases if case["status"] == "failed")
+        with_error = sum(1 for case in cases if case["error_code"])
         print(
             f"{run['run_id']}  status={run['status']}  "
             f"总={run['total']} 通过={run['passed']} 失败={run['failed']}  "
-            f"用例行={len(cases)}  游戏={run['games'] or '-'}"
+            f"用例行={len(cases)}  有失败原因={with_error}  游戏={run['games'] or '-'}"
         )
         if dry_run:
             ingested += 1
