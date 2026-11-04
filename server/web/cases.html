@@ -37,6 +37,8 @@
       .result-row { display: flex; align-items: center; gap: 12px; padding: 10px 0; border-bottom: 1px solid #f4f6f9; font-size: 14px; }
       .result-row:last-child { border-bottom: none; }
       .modal-mask { position: fixed; inset: 0; background: rgba(20, 28, 40, 0.45); display: flex; align-items: center; justify-content: center; z-index: 50; }
+      /* 关键：一旦给元素写了 display，浏览器对 hidden 属性的默认 display:none 会被作者样式盖掉，必须显式兜底 */
+      [hidden] { display: none !important; }
       .modal { background: #fff; border-radius: 14px; width: min(920px, 92vw); max-height: 88vh; display: flex; flex-direction: column; overflow: hidden; }
       .modal.narrow { width: min(520px, 92vw); }
       .modal-head { display: flex; align-items: center; gap: 12px; padding: 14px 18px; border-bottom: 1px solid #eef1f5; }
