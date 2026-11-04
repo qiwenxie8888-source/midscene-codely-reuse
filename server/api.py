@@ -31,6 +31,17 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from .case_index import (
+    CaseError,
+    ConflictError,
+    create_case,
+    delete_case,
+    list_cases,
+    read_case,
+    refresh_index,
+    save_case,
+    validate_content,
+)
 from .runner import BusyError, runner
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -248,7 +259,7 @@ def stats(
     days: int = Query(30, ge=1, le=365),
 ) -> dict[str, Any]:
     since = (date.today() - timedelta(days=days - 1)).isoformat()
-    where = ["r.started_at >= :since"]
+    where = ["r.started_at >= :since", "coalesce(r.status, '') <> 'cancelled'"]
     params: dict[str, Any] = {"since": since}
     if game:
         where.append(
@@ -283,8 +294,11 @@ def _since(days: int) -> str:
 
 
 def _scope(tables: str, days: int, game: str | None, suite: str | None):
-    """拼 days / game / suite 三种过滤条件，返回 (WHERE 片段, 参数)。"""
-    where = ["r.started_at >= :since"]
+    """拼 days / game / suite 三种过滤条件，返回 (WHERE 片段, 参数)。
+
+    取消的运行不算通过也不算失败（是人为中断），统一排除在统计口径之外。
+    """
+    where = ["r.started_at >= :since", "coalesce(r.status, '') <> 'cancelled'"]
     params: dict[str, Any] = {"since": _since(days)}
     if game:
         where.append(f"c.game_key = :game")
@@ -501,6 +515,88 @@ def analytics_distribution(
     finally:
         conn.close()
     return {"days": days, "items": items}
+
+
+# ---------------------------------------------------------------- 用例管理
+# 磁盘上的 YAML 是唯一真身；这里只做"索引 + 读写"，不把用例存进数据库
+
+
+class SaveCaseRequest(BaseModel):
+    path: str
+    content: str
+    expected_hash: str | None = None
+
+
+class ValidateCaseRequest(BaseModel):
+    content: str
+
+
+class CreateCaseRequest(BaseModel):
+    game_key: str
+    suite: str = "smoke"
+    name: str
+    case_name: str
+
+
+@app.get("/cases", include_in_schema=False)
+def cases_page() -> FileResponse:
+    return FileResponse(WEB_ROOT / "cases.html")
+
+
+@app.get("/api/cases")
+def cases_list(
+    game: str | None = Query(None),
+    suite: str | None = Query(None),
+    refresh: bool = Query(True, description="是否先扫盘刷新索引（按 mtime 增量解析）"),
+) -> dict[str, Any]:
+    stats = refresh_index() if refresh else None
+    items = list_cases(game, suite)
+    return {
+        "total": len(items),
+        "items": items,
+        "suites": {"smoke": sum(1 for i in items if i["suite"] == "smoke"),
+                   "explore": sum(1 for i in items if i["suite"] == "explore")},
+        "refresh": stats,
+    }
+
+
+@app.get("/api/cases/file")
+def cases_read(path: str = Query(..., description="相对项目根的用例路径")) -> dict[str, Any]:
+    try:
+        return read_case(path)
+    except CaseError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@app.put("/api/cases/file")
+def cases_save(payload: SaveCaseRequest) -> dict[str, Any]:
+    try:
+        return save_case(payload.path, payload.content, payload.expected_hash)
+    except ConflictError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except CaseError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@app.post("/api/cases/validate")
+def cases_validate(payload: ValidateCaseRequest) -> dict[str, Any]:
+    return validate_content(payload.content)
+
+
+@app.post("/api/cases", status_code=201)
+def cases_create(payload: CreateCaseRequest) -> dict[str, Any]:
+    try:
+        return create_case(payload.game_key, payload.suite, payload.name, payload.case_name)
+    except CaseError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@app.delete("/api/cases/file")
+def cases_delete(path: str = Query(...)) -> dict[str, Any]:
+    try:
+        return delete_case(path)
+    except CaseError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
 
 
 # ---------------------------------------------------------------- 运行控制

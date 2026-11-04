@@ -59,6 +59,18 @@ pnpm exec midscene-test model verify
 .venv/Scripts/python server/ingest.py
 ```
 
+## 用例管理页
+
+`http://127.0.0.1:8000/cases` 直接管理磁盘上的 YAML 用例（不是数据库里的副本）：
+
+- 列表按游戏/套件分组，**没跑过的用例也会显示**（扫 `games/**/*.yaml`）
+- 勾选跑（`--files`）或跑整个套件（`--project`）；**全部勾选时自动改用整包模式**，复用会话快一倍
+- 运行中显示步骤进度（`step 1/5: aiTap 11.9s`）+ 自动跟随，可随时停止（二次确认，会连同 codely 子进程一起杀）
+- 点任意用例可编辑原文：保存前校验语法与节点名，比对文件指纹防覆盖，旧版本自动备份到 `.backup/cases/edits/`
+- 新增用例生成空白骨架，删除会先备份到 `.backup/cases/deleted/`
+
+**用例正文永远只存在磁盘上**，数据库里只有可随时重建的索引（`case_files` 表）和运行结果。
+
 ## 运行控制接口
 
 服务起来后可以直接用 HTTP 触发运行，不必开终端：

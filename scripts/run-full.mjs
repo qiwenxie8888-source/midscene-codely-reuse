@@ -12,8 +12,8 @@
 //   node scripts/run-full.mjs --project smoke --files a.yaml,b.yaml   # 只跑指定文件（串行）
 //   node scripts/run-full.mjs --project smoke --json          # 每次运行输出一行 JSON 事件，供服务端读日志
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 
 const args = process.argv.slice(2);
 const has = (flag) => args.includes(flag);
@@ -70,6 +70,52 @@ const CODELY_CLEANUP = resolve(projectRoot, 'scripts/cleanup-codely.mjs');
 const CONFIG_PATH = resolve(projectRoot, 'midscene.config.ts');
 
 const python = findPython();
+
+// Midscene 每执行一次命令就产生一个运行目录（runId 为该目录名）。
+// 跑前记下已有目录、跑后对比新增，就能准确知道"这次产生了哪几条运行"，不用猜时间窗口。
+const RESULT_DIR = resolve(projectRoot, '.midscene/test-results');
+
+function listRunDirs() {
+  if (!existsSync(RESULT_DIR)) return new Set();
+  return new Set(
+    readdirSync(RESULT_DIR, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name),
+  );
+}
+
+function readRunMeta(dirName) {
+  try {
+    const summary = JSON.parse(readFileSync(join(RESULT_DIR, dirName, 'summary.json'), 'utf8'));
+    return {
+      run_id: summary.runId || dirName,
+      status: summary.status || null,
+      passed: summary.summary?.passed ?? null,
+      failed: summary.summary?.failed ?? null,
+      total: summary.summary?.total ?? null,
+    };
+  } catch {
+    return { run_id: dirName, status: null, passed: null, failed: null, total: null };
+  }
+}
+
+// 把"跑完之后新冒出来的运行目录"逐个作为 run 事件报告出去
+function reportNewRuns(seen, file) {
+  const current = listRunDirs();
+  for (const dirName of current) {
+    if (seen.has(dirName)) continue;
+    seen.add(dirName);
+    const meta = readRunMeta(dirName);
+    emit({ type: 'run', file, ...meta });
+    log(
+      '--- 产生运行 ' +
+        meta.run_id +
+        (file ? ' （' + file + '）' : '') +
+        ' status=' +
+        (meta.status ?? 'unknown'),
+    );
+  }
+}
 
 // 交互模式：保持原有行为（输出直接继承终端，进度条/颜色都不受影响）
 function runSync(label, command, commandArgs) {
@@ -145,6 +191,7 @@ async function step(label, command, commandArgs) {
 }
 
 async function main() {
+  const seenRuns = listRunDirs();
   let testOk = true;
   if (!skipTest) {
     // 上一次若被强杀，会留下孤儿 codely 进程，先清掉再开跑
@@ -164,6 +211,7 @@ async function main() {
           CONFIG_PATH,
         ]);
         testOk = testOk && ok;
+        reportNewRuns(seenRuns, file);
       }
     } else {
       testOk = await step('2/4 跑测试（project=' + project + '）', process.execPath, [
@@ -171,6 +219,7 @@ async function main() {
         '--project',
         project,
       ]);
+      reportNewRuns(seenRuns, null);
     }
   } else {
     log('跳过测试（--skip-test）');

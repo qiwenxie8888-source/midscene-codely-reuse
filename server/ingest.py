@@ -398,6 +398,29 @@ def ingest(result_dir: Path, db_path: Path, dry_run: bool) -> int:
     return 0
 
 
+def mark_cancelled(db_path: Path, run_ids: list[str]) -> int:
+    """把被取消的运行标成 cancelled。取消时 run-full 被强杀，summary 可能不完整，
+    这里直接改状态，让看板把它和"失败"区分开（不计入通过率）。"""
+    if not run_ids:
+        return 0
+    conn = sqlite3.connect(db_path)
+    try:
+        changed = 0
+        for run_id in run_ids:
+            cursor = conn.execute("UPDATE runs SET status = 'cancelled' WHERE run_id = ?", (run_id,))
+            if cursor.rowcount == 0:
+                # 运行目录存在但没被导入（summary 没写完），补一条最小记录
+                conn.execute(
+                    "INSERT INTO runs (run_id, status, ingested_at) VALUES (?, 'cancelled', ?)",
+                    (run_id, datetime.now(timezone.utc).isoformat()),
+                )
+            changed += 1
+        conn.commit()
+    finally:
+        conn.close()
+    return changed
+
+
 def main() -> int:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     parser = argparse.ArgumentParser(description="把 Midscene Test 运行产物导入 SQLite")
@@ -409,7 +432,17 @@ def main() -> int:
     )
     parser.add_argument("--db", type=Path, default=DEFAULT_DB, help="SQLite 文件路径")
     parser.add_argument("--dry-run", action="store_true", help="只打印统计，不写库")
+    parser.add_argument(
+        "--mark-cancelled",
+        default=None,
+        help="把逗号分隔的 run_id 标记为已取消（取消运行后由 runner 调用）",
+    )
     args = parser.parse_args()
+    if args.mark_cancelled:
+        ids = [item.strip() for item in args.mark_cancelled.split(",") if item.strip()]
+        count = mark_cancelled(args.db, ids)
+        print(f"已标记 {count} 条运行为 cancelled")
+        return 0
     return ingest(args.result_dir, args.db, args.dry_run)
 
 

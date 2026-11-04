@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import threading
 import time
@@ -28,6 +29,13 @@ from typing import Any, Iterator
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 RUN_FULL = PROJECT_ROOT / "scripts" / "run-full.mjs"
+RESULT_DIR = PROJECT_ROOT / ".midscene" / "test-results"
+
+# midscene 的进度行：`→ step 1/7: aiTap` / `✓ step 1/7: aiTap (15337 ms)`
+PHASE_LINE = re.compile(
+    r"^\s*([→✓✗])\s*(step|beforeAll|afterAll|beforeEach|afterEach)\s+(\d+)/(\d+):\s*(\S+?)(?:\s*\((\d+)\s*ms\))?\s*$"
+)
+CONTEXT_LINE = re.compile(r"^\s*\[(project|document|case)\s+(\d+)/(\d+)\]\s*(.*)$")
 
 MAX_QUEUE = 3  # 排队上限；再多就明确拒绝，而不是让用户以为点上了
 MAX_LOG_LINES = 5000  # 每任务日志上限，超出丢头部（长任务也不会吃爆内存）
@@ -57,6 +65,10 @@ class RunJob:
     logs: deque = field(default_factory=lambda: deque(maxlen=MAX_LOG_LINES))
     process: subprocess.Popen | None = None
     truncated: bool = False
+    # 本次任务产生的 Midscene 运行记录（run-full.mjs 的 run 事件 + 目录快照兜底）
+    runs: list[dict[str, Any]] = field(default_factory=list)
+    result_snapshot: set[str] = field(default_factory=set)
+    mode: str = "files"  # files | project（全选时自动切整包，复用会话）
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -74,6 +86,8 @@ class RunJob:
             "log_lines": len(self.logs),
             "last_seq": self.seq,
             "truncated": self.truncated,
+            "mode": self.mode,
+            "runs": self.runs,
         }
 
 
@@ -215,10 +229,37 @@ class Runner:
 
             self._execute(job)
 
+    def _suite_file_count(self, project: str) -> int:
+        """该套件在磁盘上共有多少个用例文件（用于判断"是否全选"）。"""
+        try:
+            from .case_index import list_cases, refresh_index
+
+            refresh_index()
+            return len(list_cases(suite=project))
+        except Exception:  # 索引不可用时不阻断运行，退回逐文件模式
+            return 0
+
     def _build_args(self, job: RunJob) -> list[str]:
+        """全选时改走 --project：一个进程跑完，会话能复用，比逐文件快一倍。"""
         args = ["--project", job.project, "--json"]
         if job.files:
-            args += ["--files", ",".join(job.files)]
+            total = self._suite_file_count(job.project)
+            if total and len(job.files) >= total:
+                job.mode = "project"
+                self._publish(
+                    job,
+                    "state",
+                    {
+                        "status": "running",
+                        "mode": "project",
+                        "note": f"已选全部 {total} 个文件，自动改用整包模式以复用会话",
+                    },
+                )
+            else:
+                job.mode = "files"
+                args += ["--files", ",".join(job.files)]
+        else:
+            job.mode = "project"
         if not job.clean:
             args += ["--no-clean"]
         return args
@@ -230,6 +271,7 @@ class Runner:
         env["PYTHONUNBUFFERED"] = "1"
 
         args = self._build_args(job)
+        job.result_snapshot = self._snapshot_runs()
         self._publish(job, "state", {"status": "running", "command": ["node", str(RUN_FULL), *args]})
 
         try:
@@ -293,7 +335,45 @@ class Runner:
             else:
                 job.status = "failed"
 
-        self._publish(job, "done", {"status": job.status, "exit_code": exit_code})
+        if job.status == "cancelled":
+            self._finalize_cancelled(job)
+
+        self._publish(job, "done", {"status": job.status, "exit_code": exit_code, "runs": job.runs})
+
+    def _find_python(self) -> str:
+        for candidate in (
+            PROJECT_ROOT / ".venv" / "Scripts" / "python.exe",
+            PROJECT_ROOT / ".venv" / "bin" / "python",
+        ):
+            if candidate.exists():
+                return str(candidate)
+        return "python"
+
+    def _finalize_cancelled(self, job: RunJob) -> None:
+        """被取消时 run-full 没走到入库步骤，这里补一次，并把这几条运行标成 cancelled。"""
+        run_ids = self._new_run_ids(job)
+        if not run_ids:
+            return
+        python = self._find_python()
+        ingest = str(PROJECT_ROOT / "server" / "ingest.py")
+        try:
+            subprocess.run(
+                [python, ingest], cwd=str(PROJECT_ROOT), capture_output=True, text=True, timeout=180
+            )
+            subprocess.run(
+                [python, ingest, "--mark-cancelled", ",".join(run_ids)],
+                cwd=str(PROJECT_ROOT),
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            self._publish(
+                job,
+                "log",
+                {"stream": "runner", "line": f"已把 {len(run_ids)} 条运行标记为已取消：{', '.join(run_ids)}"},
+            )
+        except (OSError, subprocess.SubprocessError) as error:
+            self._publish(job, "log", {"stream": "runner", "line": f"取消后入库失败：{error}"})
 
     def _pump(self, job: RunJob, stream, name: str) -> None:
         """把子进程的一行读出来：能解析成 JSON 事件的当事件，否则当普通日志行。"""
@@ -314,6 +394,9 @@ class Runner:
 
             if parsed is None:
                 self._publish(job, "log", {"stream": name, "line": line})
+                # 只从 stdout 解析进度行：midscene 会同时往 stdout/stderr 输出同样内容
+                if name == "stdout":
+                    self._parse_progress(job, line)
                 continue
 
             event_type = parsed.pop("type")
@@ -324,14 +407,60 @@ class Runner:
                 self._publish(job, "cmd", parsed)
             elif event_type == "log":
                 self._publish(job, "log", parsed)
+                if parsed.get("stream") == "stdout":
+                    self._parse_progress(job, parsed.get("line", ""))
             elif event_type == "result":
                 self._publish(job, "result", parsed)
+            elif event_type == "run":
+                job.runs.append(parsed)
+                self._publish(job, "run", parsed)
             else:
                 self._publish(job, event_type, parsed)
         try:
             stream.close()
         except OSError:
             pass
+
+    def _parse_progress(self, job: RunJob, line: str) -> None:
+        """把 `→ step 1/7: aiTap` / `✓ step 1/7: aiTap (15337 ms)` 配对成结构化事件。"""
+        context = CONTEXT_LINE.match(line)
+        if context:
+            kind, index, total, label = context.groups()
+            self._publish(
+                job,
+                "context",
+                {"kind": kind, "index": int(index), "total": int(total), "label": label.strip()},
+            )
+            return
+
+        phase = PHASE_LINE.match(line)
+        if not phase:
+            return
+        mark, kind, index, total, node, ms = phase.groups()
+        self._publish(
+            job,
+            "phase",
+            {
+                "phase": kind,
+                "index": int(index),
+                "total": int(total),
+                "node": node,
+                "status": "running" if mark == "→" else ("ok" if mark == "✓" else "fail"),
+                "ms": int(ms) if ms else None,
+            },
+        )
+
+    def _snapshot_runs(self) -> set[str]:
+        if not RESULT_DIR.exists():
+            return set()
+        return {entry.name for entry in RESULT_DIR.iterdir() if entry.is_dir}
+
+    def _new_run_ids(self, job: RunJob) -> list[str]:
+        """优先用 run-full 报上来的；没报（比如中途被杀）就用目录快照差集兜底。"""
+        ids = [item.get("run_id") for item in job.runs if item.get("run_id")]
+        if ids:
+            return ids
+        return sorted(self._snapshot_runs() - job.result_snapshot)
 
     def _kill_tree(self, job: RunJob) -> None:
         """Windows 必须 /T 连子孙一起杀，否则 codely.exe 会变孤儿继续占着。"""
