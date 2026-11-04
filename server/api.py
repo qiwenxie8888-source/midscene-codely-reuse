@@ -618,11 +618,12 @@ def cases_delete(path: str = Query(...)) -> dict[str, Any]:
 
 
 class StartRunRequest(BaseModel):
-    """起一次运行。files 为空表示跑整个 project。"""
+    """起一次运行。files 为空表示跑整个 project；指定 game_key 时只跑该游戏的用例。"""
 
     project: str = "smoke"
     files: list[str] = []
     clean: bool = True
+    game_key: str | None = None
 
 
 def _resolve_case_files(files: list[str]) -> list[str]:
@@ -649,8 +650,16 @@ def start_run(payload: StartRunRequest) -> dict[str, Any]:
     if payload.project not in ("smoke", "explore"):
         raise HTTPException(status_code=400, detail=f"未知套件：{payload.project}")
     files = _resolve_case_files(payload.files)
+    game_key = payload.game_key
+    if game_key:
+        channel, _, game = game_key.partition("/")
+        if not (PROJECT_ROOT / "games" / channel / game).is_dir():
+            raise HTTPException(status_code=400, detail=f"游戏目录不存在：{game_key}")
+        # 只跑该游戏的用例，杜绝跨游戏混跑导致的状态污染
+        if files and any(not item.startswith(f"games/{game_key}/") for item in files):
+            raise HTTPException(status_code=400, detail=f"文件不属于游戏 {game_key}")
     try:
-        job = runner.start(payload.project, files, payload.clean)
+        job = runner.start(payload.project, files, payload.clean, game_key)
     except BusyError as error:
         snapshot = runner.snapshot()
         raise HTTPException(

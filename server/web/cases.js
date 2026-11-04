@@ -1,4 +1,4 @@
-// 用例管理页：列表 / 运行 / 实时进度 / 停止 / 编辑 / 新增 / 删除
+// 用例管理页：左侧渠道/游戏树 + 右侧套件列表 + 运行 / 实时进度 / 停止 / 编辑 / 新增 / 删除
 // 零框架、原生 fetch，与 index.html、analytics.html 保持一致
 
 const SUITE_LABELS = { smoke: '冒烟用例', explore: '探索用例' };
@@ -11,7 +11,9 @@ const state = {
   items: [],
   selected: new Set(),
   selectedSuite: null,
-  collapsed: { explore: true },
+  selectedGame: null,
+  collapsed: {},
+  activeGame: null, // null = 全部用例视图（只读，不能运行）
   jobId: null,
   startedAt: null,
   timer: null,
@@ -40,97 +42,178 @@ async function api(path, options) {
   return data;
 }
 
-// ------------------------------------------------------------------ 列表
+// ------------------------------------------------------------------ 数据
 
 async function load() {
   const data = await api('/api/cases');
   state.items = data.items || [];
-  // 选中的文件如果被删掉/改名了，清掉
   const alive = new Set(state.items.map((item) => item.path));
   for (const path of [...state.selected]) {
     if (!alive.has(path)) state.selected.delete(path);
   }
+  const games = new Set(state.items.map((item) => item.game_key));
+  if (state.activeGame && !games.has(state.activeGame)) state.activeGame = null;
   render();
 }
 
-function groupBySuite() {
-  const groups = { smoke: [], explore: [] };
+function gamesFromItems() {
+  const map = new Map();
   for (const item of state.items) {
-    (groups[item.suite] || (groups[item.suite] = [])).push(item);
+    const key = item.game_key || '(未关联)';
+    if (!map.has(key)) {
+      map.set(key, {
+        game_key: key,
+        channel: item.channel,
+        channel_label: item.channel_label || item.channel || '未知渠道',
+        game_name: item.game_name || item.game_dir || key,
+        items: [],
+      });
+    }
+    map.get(key).items.push(item);
   }
-  for (const key of Object.keys(groups)) {
-    groups[key].sort((a, b) => (a.seq ?? 9999) - (b.seq ?? 9999) || a.path.localeCompare(b.path));
-  }
-  return groups;
+  return [...map.values()].sort((a, b) => a.game_key.localeCompare(b.game_key));
 }
 
+function currentScope() {
+  const games = gamesFromItems();
+  return state.activeGame ? games.filter((game) => game.game_key === state.activeGame) : games;
+}
+
+// ------------------------------------------------------------------ 渲染
+
 function render() {
-  const groups = groupBySuite();
+  const games = gamesFromItems();
+  renderSidebar(games);
+
   const host = el('suites');
   host.innerHTML = '';
 
-  for (const suite of ['smoke', 'explore']) {
-    const items = groups[suite] || [];
-    if (!items.length) continue;
-    const collapsed = suite === 'explore' && state.collapsed.explore;
-    const selectedInSuite = items.filter((item) => state.selected.has(item.path)).length;
+  if (!games.length) {
+    host.innerHTML = '<div class="suite-block" style="padding:18px"><span class="hint">还没有任何用例文件。先在左侧选择游戏后点「+ 新增」，或者直接在 games/ 下建目录。</span></div>';
+    return;
+  }
 
-    const block = document.createElement('div');
-    block.className = 'suite-block';
+  if (!state.activeGame) {
+    const tip = document.createElement('div');
+    tip.className = 'notice';
+    tip.textContent = '当前是「全部用例」视图，只用于浏览；运行前请先在左侧选择一个游戏。';
+    host.appendChild(tip);
+  }
 
-    const head = document.createElement('div');
-    head.className = 'suite-head';
-    head.innerHTML = `
-      ${suite === 'explore' ? `<button class="btn-mini" data-toggle="${suite}">${collapsed ? '▸' : '▾'}</button>` : ''}
-      <h3>${SUITE_LABELS[suite]} (${items.length})</h3>
-      <span class="hint">${SUITE_NOTES[suite] || ''}</span>
-      <span class="spacer"></span>
-      <button class="btn-mini" data-new="${suite}">+ 新增</button>
-      <button class="btn ghost" data-run-suite="${suite}">运行整个${SUITE_LABELS[suite]}</button>
-    `;
-    block.appendChild(head);
-
-    if (!collapsed) {
-      for (const item of items) {
-        block.appendChild(caseRow(item, items.length));
-      }
-      const bar = document.createElement('div');
-      bar.className = 'toolbar';
-      bar.innerHTML = `
-        <button class="btn-mini" data-select-all="${suite}">全选</button>
-        <span class="hint">${
-          selectedInSuite === items.length && items.length > 0
-            ? '已全部选中，运行时会自动改用整包模式（复用会话，更快）'
-            : `已选 ${selectedInSuite} / ${items.length}`
-        }</span>
-        <span class="spacer"></span>
-        <button class="btn" data-run-selected="${suite}" ${selectedInSuite === 0 ? 'disabled' : ''}>
-          运行选中 (${selectedInSuite})
-        </button>
-      `;
-      block.appendChild(bar);
+  for (const game of currentScope()) {
+    for (const suite of ['smoke', 'explore']) {
+      const items = game.items.filter((item) => item.suite === suite);
+      if (!items.length) continue;
+      host.appendChild(suiteBlock(game, suite, items));
     }
-    host.appendChild(block);
   }
 }
 
-function caseRow(item, total) {
+function renderSidebar(games) {
+  const host = el('sidebar');
+  host.innerHTML = '';
+
+  const all = document.createElement('div');
+  all.className = 'side-item' + (state.activeGame ? '' : ' active');
+  all.dataset.game = '';
+  all.innerHTML = `<span>全部用例</span><span class="count">${state.items.length}</span>`;
+  host.appendChild(all);
+
+  const byChannel = new Map();
+  for (const game of games) {
+    const key = game.channel || 'unknown';
+    if (!byChannel.has(key)) byChannel.set(key, { label: game.channel_label, games: [] });
+    byChannel.get(key).games.push(game);
+  }
+
+  for (const [, group] of byChannel) {
+    const header = document.createElement('div');
+    header.className = 'side-channel';
+    header.textContent = group.label;
+    host.appendChild(header);
+    for (const game of group.games) {
+      const node = document.createElement('div');
+      node.className = 'side-item' + (state.activeGame === game.game_key ? ' active' : '');
+      node.dataset.game = game.game_key;
+      node.title = game.game_key;
+      node.innerHTML = `<span>${game.game_name}</span><span class="count">${game.items.length}</span>`;
+      host.appendChild(node);
+    }
+  }
+}
+
+function suiteBlock(game, suite, items) {
+  const block = document.createElement('div');
+  block.className = 'suite-block';
+  const key = `${game.game_key}/${suite}`;
+  const collapsed = suite === 'explore' ? (state.collapsed[key] ?? true) : false;
+  const selectedInSuite = items.filter((item) => state.selected.has(item.path)).length;
+  const allSelected = selectedInSuite === items.length && items.length > 0;
+  const canRun = Boolean(state.activeGame);
+
+  const title = state.activeGame
+    ? `${SUITE_LABELS[suite]} (${items.length})`
+    : `${game.channel_label} · ${game.game_name} · ${SUITE_LABELS[suite]} (${items.length})`;
+
+  const head = document.createElement('div');
+  head.className = 'suite-head';
+  head.innerHTML = `
+    ${suite === 'explore' ? `<button class="btn-mini" data-toggle="${key}">${collapsed ? '▸' : '▾'}</button>` : ''}
+    <h3>${title}</h3>
+    <span class="hint">${SUITE_NOTES[suite] || ''}</span>
+    <span class="spacer"></span>
+    <button class="btn-mini" data-new="${suite}" data-game="${game.game_key}">+ 新增</button>
+    <button class="btn ghost" data-run-suite="${suite}" data-game="${game.game_key}" ${canRun ? '' : 'disabled title="请先在左侧选择游戏"'}>运行整个${SUITE_LABELS[suite]}</button>
+  `;
+  block.appendChild(head);
+
+  if (!collapsed) {
+    for (const item of items) block.appendChild(caseRow(item, game));
+    const bar = document.createElement('div');
+    bar.className = 'toolbar';
+    bar.innerHTML = `
+      <button class="btn-mini" data-select-all="${suite}" data-game="${game.game_key}" ${canRun ? '' : 'disabled'}>全选</button>
+      <span class="hint">${
+        allSelected
+          ? '已全部选中，运行时会自动改用整包模式（复用会话，更快）'
+          : `已选 ${selectedInSuite} / ${items.length}`
+      }</span>
+      <span class="spacer"></span>
+      <button class="btn" data-run-selected="${suite}" data-game="${game.game_key}" ${
+        selectedInSuite === 0 || !canRun ? 'disabled' : ''
+      }>运行选中 (${selectedInSuite})</button>
+    `;
+    block.appendChild(bar);
+  }
+  return block;
+}
+
+function caseRow(item, game) {
   const row = document.createElement('div');
   row.className = 'case-row' + (item.parse_error ? ' broken' : '');
 
   const checkbox = document.createElement('input');
   checkbox.type = 'checkbox';
   checkbox.checked = state.selected.has(item.path);
-  const blocked = state.selectedSuite && state.selectedSuite !== item.suite;
-  checkbox.disabled = blocked;
-  checkbox.title = blocked ? '一次只能在一个套件里勾选' : '';
+  // 一次只能在一个「游戏 + 套件」里勾选：跨游戏跑会因状态污染产生假失败
+  const blocked =
+    (state.selectedGame && state.selectedGame !== item.game_key) ||
+    (state.selectedSuite && state.selectedSuite !== item.suite) ||
+    !state.activeGame;
+  checkbox.disabled = Boolean(blocked);
+  if (!state.activeGame) checkbox.title = '请先在左侧选择一个游戏';
+  else if (blocked) checkbox.title = '一次只能在一个游戏的一个套件里勾选';
   checkbox.addEventListener('change', () => {
     if (checkbox.checked) {
+      state.selectedGame = item.game_key;
       state.selectedSuite = item.suite;
       state.selected.add(item.path);
     } else {
       state.selected.delete(item.path);
-      if (!state.selected.size) state.selectedSuite = null;
+      if (!state.selected.size) {
+        state.selectedGame = null;
+        state.selectedSuite = null;
+      }
     }
     render();
   });
@@ -218,19 +301,6 @@ function appendLine(text, className) {
   if (stick) box.scrollTop = box.scrollHeight;
 }
 
-function appendIndent(text, level, className) {
-  const box = el('log-lines');
-  const line = document.createElement('div');
-  line.className = 'log-line';
-  const span = document.createElement('span');
-  span.className = `indent${level}${className ? ' ' + className : ''}`;
-  span.textContent = text;
-  line.appendChild(span);
-  const stick = box.scrollHeight - box.scrollTop - box.clientHeight < 60;
-  box.appendChild(line);
-  if (stick) box.scrollTop = box.scrollHeight;
-}
-
 function phaseText(event) {
   const mark = event.status === 'running' ? '▸' : event.status === 'ok' ? '✓' : '✗';
   const ms = event.ms != null ? ` ${(event.ms / 1000).toFixed(1)}s` : '';
@@ -257,21 +327,22 @@ function watch(runId) {
 
   source.addEventListener('context', (message) => {
     const data = JSON.parse(message.data);
-    if (data.kind === 'project') return; // 只有 smoke 一个套件，没必要显示
+    if (data.kind === 'project') return;
     const text =
       data.kind === 'case'
         ? `[用例 ${data.index}/${data.total}] ${data.label}`
         : `[文件 ${data.index}/${data.total}] ${data.label}`;
-    appendIndent(text, data.kind === 'case' ? 0 : 0, 'ctx');
+    appendLine(text, 'ctx');
   });
 
   source.addEventListener('phase', (message) => {
     const data = JSON.parse(message.data);
     const key = `${data.phase}-${data.index}-${data.node}`;
     const indent = data.phase === 'step' ? 2 : 1;
+    const text = '  '.repeat(indent) + phaseText(data);
     if (state.phaseLines.has(key)) {
       const node = state.phaseLines.get(key);
-      node.textContent = ' '.repeat(indent * 2) + phaseText(data);
+      node.textContent = text;
       node.className = `indent${indent} ${data.status === 'ok' ? 'ok' : data.status === 'fail' ? 'fail' : ''}`;
       return;
     }
@@ -280,7 +351,7 @@ function watch(runId) {
     line.className = 'log-line';
     const span = document.createElement('span');
     span.className = `indent${indent}`;
-    span.textContent = ' '.repeat(indent * 2) + phaseText(data);
+    span.textContent = text;
     line.appendChild(span);
     const stick = box.scrollHeight - box.scrollTop - box.clientHeight < 60;
     box.appendChild(line);
@@ -290,16 +361,12 @@ function watch(runId) {
 
   source.addEventListener('run', (message) => {
     const data = JSON.parse(message.data);
-    appendLine(`· 产生运行 ${data.run_id}${data.file ? `（${data.file.split('/').pop()}）` : ''} status=${data.status || 'unknown'}`, 'run');
+    appendLine(`· 产生运行 ${data.run_id} status=${data.status || 'unknown'}`, 'run');
   });
 
-  source.addEventListener('done', (message) => {
-    const data = JSON.parse(message.data);
-    finish(data);
-  });
+  source.addEventListener('done', (message) => finish(JSON.parse(message.data)));
 
   source.addEventListener('error', () => {
-    // EventSource 会自动重连；任务已结束时服务端会关闭连接，这里再兜底查一次状态
     if (!state.running) source.close();
   });
 }
@@ -314,8 +381,7 @@ async function finish(done) {
     state.eventSource = null;
   }
 
-  const statusText =
-    done.status === 'passed' ? '通过' : done.status === 'cancelled' ? '已取消' : '失败';
+  const statusText = done.status === 'passed' ? '通过' : done.status === 'cancelled' ? '已取消' : '失败';
   const className = done.status === 'passed' ? 'ok' : done.status === 'cancelled' ? 'run' : 'fail';
   appendLine(`● 任务结束：${statusText}（exit=${done.exit_code ?? '-'}）`, className);
 
@@ -324,7 +390,6 @@ async function finish(done) {
   el('result-title').textContent = `本次运行结果（${runs.length} 条运行记录）`;
   const rows = el('result-rows');
   rows.innerHTML = '';
-
   if (!runs.length) {
     rows.innerHTML = '<div class="result-row"><span class="hint">本次没有产生运行记录（可能启动前就失败了）</span></div>';
   }
@@ -332,16 +397,16 @@ async function finish(done) {
   for (const run of runs) {
     const row = document.createElement('div');
     row.className = 'result-row';
-    const badge =
-      run.status === 'success'
+    row.innerHTML =
+      (run.status === 'success'
         ? '<span class="msg ok">✓ 通过</span>'
         : run.status === 'cancelled'
           ? '<span class="msg">已取消</span>'
-          : '<span class="msg err">✗ 失败</span>';
-    const counts = run.total != null ? `总 ${run.total} / 通过 ${run.passed} / 失败 ${run.failed}` : '';
-    row.innerHTML = `${badge}<span class="file">${run.run_id}</span><span>${counts}</span><span class="spacer" style="flex:1"></span><a class="btn-mini" target="_blank">查看报告</a>`;
+          : '<span class="msg err">✗ 失败</span>') +
+      `<span class="file">${run.run_id}</span>` +
+      `<span>${run.total != null ? `总 ${run.total} / 通过 ${run.passed} / 失败 ${run.failed}` : ''}</span>` +
+      '<span style="flex:1"></span><a class="btn-mini" target="_blank">查看报告</a>';
     rows.appendChild(row);
-    // 报告链接要查库才有（run 事件里只有 run_id 和状态）
     api(`/api/runs/${run.run_id}`)
       .then((detail) => {
         const link = row.querySelector('a');
@@ -491,7 +556,7 @@ async function openEditor(path) {
       if (error.status === 409) {
         confirmBox(
           '文件已被外部修改',
-          '这个文件在你编辑期间被别处改过了（比如编辑器或 Git 操作）。<br />强制保存会覆盖外部改动，确定吗？',
+          '这个文件在你编辑期间被别处改过了。<br />强制保存会覆盖外部改动，确定吗？',
           async () => {
             try {
               const forced = await api('/api/cases/file', {
@@ -517,10 +582,13 @@ async function openEditor(path) {
 
 // ------------------------------------------------------------------ 新增 / 删除
 
-function openNewCase(suite) {
-  const games = [...new Set(state.items.map((item) => item.game_key))].filter(Boolean);
+function openNewCase(suite, gameKey) {
+  const games = gamesFromItems();
   const options = games
-    .map((game) => `<option value="${game}">${game}</option>`)
+    .map(
+      (game) =>
+        `<option value="${game.game_key}"${game.game_key === gameKey ? ' selected' : ''}>${game.channel_label} · ${game.game_name}</option>`,
+    )
     .join('');
   const modal = openModal(
     `<div class="modal-head"><h3>新增用例</h3></div>
@@ -586,7 +654,10 @@ function confirmDelete(item) {
           method: 'DELETE',
         });
         state.selected.delete(item.path);
-        if (!state.selected.size) state.selectedSuite = null;
+        if (!state.selected.size) {
+          state.selectedSuite = null;
+          state.selectedGame = null;
+        }
         await load();
         alert('已删除，备份在：' + result.backup);
       } catch (error) {
@@ -600,7 +671,7 @@ function confirmDelete(item) {
 // ------------------------------------------------------------------ 事件绑定
 
 document.addEventListener('click', async (event) => {
-  const target = event.target.closest('button');
+  const target = event.target.closest('button, .side-item');
   if (!target) return;
 
   if (target.id === 'refresh') {
@@ -618,55 +689,84 @@ document.addEventListener('click', async (event) => {
     return;
   }
 
-  const toggleSuite = target.dataset.toggle;
-  if (toggleSuite) {
-    state.collapsed[toggleSuite] = !state.collapsed[toggleSuite];
+  // 左侧树：切换当前游戏
+  if (target.classList.contains('side-item')) {
+    state.activeGame = target.dataset.game || null;
+    state.selected.clear();
+    state.selectedSuite = null;
+    state.selectedGame = null;
+    render();
+    return;
+  }
+
+  const toggle = target.dataset.toggle;
+  if (toggle) {
+    state.collapsed[toggle] = !(state.collapsed[toggle] ?? true);
     render();
     return;
   }
 
   const newSuite = target.dataset.new;
   if (newSuite) {
-    openNewCase(newSuite);
+    openNewCase(newSuite, target.dataset.game);
     return;
   }
 
+  const game = target.dataset.game;
   const selectAll = target.dataset.selectAll;
   if (selectAll) {
-    const items = state.items.filter((item) => item.suite === selectAll);
+    const items = state.items.filter((item) => item.suite === selectAll && item.game_key === game);
     const allSelected = items.every((item) => state.selected.has(item.path));
-    state.selectedSuite = allSelected ? null : selectAll;
     state.selected.clear();
-    if (!allSelected) for (const item of items) state.selected.add(item.path);
+    if (allSelected) {
+      state.selectedSuite = null;
+      state.selectedGame = null;
+    } else {
+      state.selectedSuite = selectAll;
+      state.selectedGame = game;
+      for (const item of items) state.selected.add(item.path);
+    }
     render();
     return;
   }
 
   const runSuite = target.dataset.runSuite;
   if (runSuite) {
-    const items = state.items.filter((item) => item.suite === runSuite);
-    if (!items.length) return;
+    const items = state.items.filter((item) => item.suite === runSuite && item.game_key === game);
+    if (!items.length || !state.activeGame) return;
+    const gameInfo = gamesFromItems().find((entry) => entry.game_key === game);
     confirmBox(
-      `运行整个${SUITE_LABELS[runSuite]}`,
-      `将运行 ${items.length} 条用例，一个进程跑完（会话可复用）。<br />` +
-        (runSuite === 'explore' ? '<br />探索集耗时约 30-40 分钟，确定开始吗？' : ''),
-      () => startRun({ project: runSuite, files: [], clean: true }, `整个${SUITE_LABELS[runSuite]}`),
+      '运行整个' + SUITE_LABELS[runSuite],
+      `将运行「${gameInfo ? gameInfo.game_name : game}」的 ${items.length} 条用例，` +
+        '一个进程跑完（会话可复用）。' +
+        (runSuite === 'explore' ? '<br /><br />探索集耗时约 30-40 分钟，确定开始吗？' : ''),
+      () =>
+        startRun(
+          { project: runSuite, files: [], clean: true, game_key: game },
+          `${gameInfo ? gameInfo.game_name : game} · 整个${SUITE_LABELS[runSuite]}`,
+        ),
     );
     return;
   }
 
   const runSelected = target.dataset.runSelected;
   if (runSelected) {
-    const files = [...state.selected].filter((path) => path.startsWith(`games/`));
+    const files = [...state.selected];
     if (!files.length) return;
-    const total = state.items.filter((item) => item.suite === runSelected).length;
-    const title = files.length === total ? `整个${SUITE_LABELS[runSelected]}（全选）` : `选中的 ${files.length} 条用例`;
+    const total = state.items.filter(
+      (item) => item.suite === runSelected && item.game_key === state.selectedGame,
+    ).length;
+    const gameInfo = gamesFromItems().find((entry) => entry.game_key === state.selectedGame);
+    const title =
+      files.length === total
+        ? `${gameInfo ? gameInfo.game_name : ''} · 整个${SUITE_LABELS[runSelected]}（全选）`
+        : `选中的 ${files.length} 条用例`;
     confirmBox('确认运行', `将运行 ${files.length} 条用例：<br />${files.map((f) => '· ' + f.split('/').pop()).join('<br />')}`, () =>
-      startRun({ project: runSelected, files, clean: true }, title),
+      startRun({ project: runSelected, files, clean: true, game_key: state.selectedGame }, title),
     );
   }
 });
 
 load().catch((error) => {
-  el('suites').innerHTML = `<div class="suite-block" style="padding:18px" class="msg err">加载失败：${error.message}</div>`;
+  el('suites').innerHTML = `<div class="suite-block" style="padding:18px"><span class="msg err">加载失败：${error.message}</span></div>`;
 });

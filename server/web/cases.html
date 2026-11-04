@@ -6,6 +6,15 @@
     <title>用例管理 · game-smoke</title>
     <link rel="stylesheet" href="/static/style.css" />
     <style>
+      .layout { display: flex; gap: 16px; align-items: flex-start; }
+      .sidebar { width: 230px; flex: 0 0 230px; background: #fff; border-radius: 12px; padding: 10px; position: sticky; top: 16px; }
+      .side-item { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: 8px; cursor: pointer; font-size: 14px; color: #3a4a5c; }
+      .side-item:hover { background: #f2f5f9; }
+      .side-item.active { background: #eef4ff; color: #2f6fd0; font-weight: 600; }
+      .side-item .count { margin-left: auto; font-size: 12px; color: #9aa4b2; }
+      .side-channel { padding: 12px 10px 4px; font-size: 12px; color: #9aa4b2; letter-spacing: 0.04em; }
+      .main { flex: 1; min-width: 0; }
+      .notice { background: #fff8e6; border: 1px solid #ffe2a8; color: #8a6100; border-radius: 10px; padding: 10px 14px; font-size: 13px; margin-bottom: 16px; }
       .suite-block { background: #fff; border-radius: 12px; margin-bottom: 16px; overflow: hidden; }
       .suite-head { display: flex; align-items: center; gap: 12px; padding: 14px 18px; border-bottom: 1px solid #eef1f5; }
       .suite-head h3 { margin: 0; font-size: 15px; }
@@ -76,22 +85,27 @@
         </div>
       </header>
 
-      <section id="suites"></section>
+      <div class="layout">
+        <aside class="sidebar" id="sidebar"></aside>
+        <div class="main">
+          <section id="suites"></section>
 
-      <section class="log-box" id="run-panel" hidden>
-        <div class="run-head">
-          <strong id="run-title">正在运行</strong>
-          <span class="spacer"></span>
-          <span class="hint" id="run-elapsed"></span>
-          <button id="stop" type="button" class="btn ghost">停止运行</button>
+          <section class="log-box" id="run-panel" hidden>
+            <div class="run-head">
+              <strong id="run-title">正在运行</strong>
+              <span class="spacer"></span>
+              <span class="hint" id="run-elapsed"></span>
+              <button id="stop" type="button" class="btn ghost">停止运行</button>
+            </div>
+            <div id="log-lines"></div>
+          </section>
+
+          <section class="result-box" id="result-panel" hidden>
+            <div class="run-head"><strong id="result-title">上次运行结果</strong></div>
+            <div id="result-rows"></div>
+          </section>
         </div>
-        <div id="log-lines"></div>
-      </section>
-
-      <section class="result-box" id="result-panel" hidden>
-        <div class="run-head"><strong id="result-title">上次运行结果</strong></div>
-        <div id="result-rows"></div>
-      </section>
+      </div>
     </div>
 
     <div class="modal-mask" id="modal-mask" hidden></div>

@@ -33,6 +33,9 @@ SUITES = ("smoke", "explore")
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 SEQ_RE = re.compile(r"^(\d+)-")
 NODE_ROW_RE = re.compile(r"^\|\s*([A-Za-z][\w.]*)\s*\|")
+# 渠道中文名来自 platforms/<渠道>.ts 的 label；游戏中文名来自 game.config.ts 的 name
+PLATFORM_LABEL_RE = re.compile(r"""^\s*label:\s*['"]([^'"]+)['"]""", re.MULTILINE)
+GAME_NAME_RE = re.compile(r"""^\s*name:\s*['"]([^'"]+)['"]""", re.MULTILINE)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS case_files (
@@ -282,6 +285,9 @@ def refresh_index(force: bool = False) -> dict[str, int]:
 
 
 def list_cases(game: str | None = None, suite: str | None = None) -> list[dict[str, Any]]:
+    """列出用例，附带渠道/游戏的中文名（从 TS 配置里抓，抓不到退回 key）。"""
+    labels = channel_labels()
+    names = game_names()
     clauses = ["1 = 1"]
     params: list[Any] = []
     if game:
@@ -299,7 +305,47 @@ def list_cases(game: str | None = None, suite: str | None = None) -> list[dict[s
             """,
             params,
         ).fetchall()
-    return [dict(row) for row in rows]
+    items = []
+    for row in rows:
+        item = dict(row)
+        channel, _, game_dir = (item["game_key"] or "").partition("/")
+        item["channel"] = channel or None
+        item["channel_label"] = labels.get(channel, channel or None)
+        item["game_dir"] = game_dir or None
+        item["game_name"] = names.get(item["game_key"], game_dir or None)
+        items.append(item)
+    return items
+
+
+def channel_labels() -> dict[str, str]:
+    """platforms/<渠道>.ts 里的 label → {渠道key: 中文名}。读不到就空，前端退回 key。"""
+    labels: dict[str, str] = {}
+    platforms = PROJECT_ROOT / "platforms"
+    if not platforms.is_dir():
+        return labels
+    for path in platforms.glob("*.ts"):
+        if path.stem in ("types", "index"):
+            continue
+        match = PLATFORM_LABEL_RE.search(path.read_text(encoding="utf-8", errors="replace"))
+        if match:
+            labels[path.stem] = match.group(1)
+    return labels
+
+
+def game_names() -> dict[str, str]:
+    """games/<渠道>/<游戏>/game.config.ts 里的 name → {game_key: 中文名}。"""
+    names: dict[str, str] = {}
+    if not GAMES_ROOT.is_dir():
+        return names
+    for config in GAMES_ROOT.glob("*/*/game.config.ts"):
+        parts = config.relative_to(PROJECT_ROOT).parts
+        if len(parts) < 4:
+            continue
+        _, channel, game_dir = parts[0], parts[1], parts[2]
+        match = GAME_NAME_RE.search(config.read_text(encoding="utf-8", errors="replace"))
+        if match:
+            names[f"{channel}/{game_dir}"] = match.group(1)
+    return names
 
 
 # ---------------------------------------------------------------- 读写

@@ -54,6 +54,7 @@ class RunJob:
     project: str
     files: list[str]
     clean: bool
+    game_key: str | None = None  # 指定游戏后只跑该游戏目录下的用例
     status: str = "queued"  # queued | running | passed | failed | cancelled | interrupted
     created_at: float = field(default_factory=time.time)
     started_at: float | None = None
@@ -76,6 +77,7 @@ class RunJob:
             "project": self.project,
             "files": self.files,
             "clean": self.clean,
+            "game_key": self.game_key,
             "status": self.status,
             "created_at": self.created_at,
             "started_at": self.started_at,
@@ -105,14 +107,22 @@ class Runner:
 
     # ------------------------------------------------------------------ 对外
 
-    def start(self, project: str, files: list[str], clean: bool = True) -> RunJob:
+    def start(
+        self,
+        project: str,
+        files: list[str],
+        clean: bool = True,
+        game_key: str | None = None,
+    ) -> RunJob:
         with self._lock:
             waiting = [jid for jid in self._queue if self._jobs[jid].status == "queued"]
             if len(waiting) >= MAX_QUEUE:
                 raise BusyError(f"队列已满（最多排队 {MAX_QUEUE} 个）")
 
             run_id = time.strftime("%Y%m%dT%H%M%S") + "-" + uuid.uuid4().hex[:4]
-            job = RunJob(run_id=run_id, project=project, files=files, clean=clean)
+            job = RunJob(run_id=run_id, project=project, files=files, clean=clean, game_key=game_key)
+            # 未指定文件即整包模式；指定了则等 _build_args 按"是否全选"再定
+            job.mode = "project" if not files else "files"
             self._jobs[run_id] = job
             self._queue.append(run_id)
             self._publish(job, "state", {"status": job.status, "position": len(waiting)})
@@ -229,21 +239,26 @@ class Runner:
 
             self._execute(job)
 
-    def _suite_file_count(self, project: str) -> int:
-        """该套件在磁盘上共有多少个用例文件（用于判断"是否全选"）。"""
+    def _suite_file_count(self, project: str, game_key: str | None = None) -> int:
+        """该套件（或该游戏该套件）共有多少个用例文件，用于判断"是否全选"。"""
         try:
             from .case_index import list_cases, refresh_index
 
             refresh_index()
-            return len(list_cases(suite=project))
+            return len(list_cases(game=game_key, suite=project))
         except Exception:  # 索引不可用时不阻断运行，退回逐文件模式
             return 0
 
     def _build_args(self, job: RunJob) -> list[str]:
-        """全选时改走 --project：一个进程跑完，会话能复用，比逐文件快一倍。"""
+        """命中"整包"条件时用 --only/--project 走单进程，复用会话。
+
+        整包条件：未指定文件，或选中文件数 == 当前游戏（未指定游戏时是整个套件）的文件数。
+        """
         args = ["--project", job.project, "--json"]
+        if job.game_key:
+            args += ["--only", f"games/{job.game_key}"]
         if job.files:
-            total = self._suite_file_count(job.project)
+            total = self._suite_file_count(job.project, job.game_key)
             if total and len(job.files) >= total:
                 job.mode = "project"
                 self._publish(
