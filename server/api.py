@@ -51,6 +51,20 @@ REPORT_ROOT = (PROJECT_ROOT / "midscene_run" / "report").resolve()
 app = FastAPI(title="game-smoke API", version="0.1.0")
 
 
+@app.middleware("http")
+async def no_store_for_assets(request, call_next):
+    """页面与前端资源一律不缓存。
+
+    开发期改完前端直接刷新就能看到，避免浏览器拿旧的 HTML/JS 导致"改了没生效"。
+    """
+    response = await call_next(request)
+    content_type = response.headers.get("content-type", "")
+    if content_type.startswith(("text/html", "application/javascript", "text/css")):
+        response.headers["Cache-Control"] = "no-store, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+    return response
+
+
 def connect() -> sqlite3.Connection:
     """每次请求开一个只读连接，避免多线程共享连接的问题。"""
     if not DB_PATH.exists():
