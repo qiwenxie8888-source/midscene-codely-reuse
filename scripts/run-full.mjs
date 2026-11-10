@@ -26,6 +26,9 @@ const project = valueOf('--project', 'smoke');
 const skipTest = has('--skip-test');
 const noClean = has('--no-clean');
 const jsonMode = has('--json');
+// 只跑某个游戏（渠道/游戏目录）。会给 midscene-test 加 --only games/<game>，
+// 从而"只跑这个游戏"与"一个进程跑完复用会话"两者兼得。
+const game = valueOf('--game', '').trim();
 // 一条用例一个 YAML 之后，"跑哪几条"就等于"跑哪几个文件"。
 // midscene-test 一次只接受一个路径，所以这里串行逐个调用。
 const files = valueOf('--files', '')
@@ -70,6 +73,24 @@ const CODELY_CLEANUP = resolve(projectRoot, 'scripts/cleanup-codely.mjs');
 const CONFIG_PATH = resolve(projectRoot, 'midscene.config.ts');
 
 const python = findPython();
+
+/** 列出已登记的游戏（用于 --game 缺失时报错提示）。 */
+function listGames() {
+  const root = resolve(projectRoot, 'games');
+  if (!existsSync(root)) return [];
+  const names = [];
+  for (const channel of readdirSync(root, { withFileTypes: true })) {
+    if (!channel.isDirectory()) continue;
+    const channelDir = resolve(root, channel.name);
+    for (const game of readdirSync(channelDir, { withFileTypes: true })) {
+      if (!game.isDirectory()) continue;
+      if (existsSync(resolve(channelDir, game.name, 'game.config.ts'))) {
+        names.push(`${channel.name}/${game.name}`);
+      }
+    }
+  }
+  return names.sort();
+}
 
 // Midscene 每执行一次命令就产生一个运行目录（runId 为该目录名）。
 // 跑前记下已有目录、跑后对比新增，就能准确知道"这次产生了哪几条运行"，不用猜时间窗口。
@@ -192,8 +213,23 @@ async function step(label, command, commandArgs) {
 
 async function main() {
   const seenRuns = listRunDirs();
+  const onlyArgs = game ? ['--only', `games/${game}`] : [];
   let testOk = true;
   if (!skipTest) {
+    // 多游戏之后"不带 --game 就跑整个套件"会把多个游戏串着跑，容易因状态污染产生假失败，
+    // 所以这里直接拒绝，把可用游戏列出来。
+    if (!game && files.length === 0) {
+      const available = listGames();
+      const message =
+        '请用 --game <渠道>/<游戏> 指定要跑的游戏（多游戏混跑会产生假失败）' +
+        (available.length ? `。可用游戏：${available.join(', ')}` : '。当前还没有任何游戏');
+      log('错误：' + message);
+      emit({ type: 'error', message });
+      emit({ type: 'result', test: false, ingest: false, clean: false, exitCode: 1 });
+      process.exitCode = 1;
+      return;
+    }
+
     // 上一次若被强杀，会留下孤儿 codely 进程，先清掉再开跑
     await step('1/4 清理遗留 codely 进程', process.execPath, [CODELY_CLEANUP]);
 
@@ -214,11 +250,11 @@ async function main() {
         reportNewRuns(seenRuns, file);
       }
     } else {
-      testOk = await step('2/4 跑测试（project=' + project + '）', process.execPath, [
-        MIDSCENE_BIN,
-        '--project',
-        project,
-      ]);
+      testOk = await step(
+        `2/4 跑测试（project=${project}${game ? `，game=${game}` : ''}）`,
+        process.execPath,
+        [MIDSCENE_BIN, '--project', project, ...onlyArgs],
+      );
       reportNewRuns(seenRuns, null);
     }
   } else {

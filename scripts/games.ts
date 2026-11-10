@@ -1,4 +1,5 @@
-// 游戏注册表：新增游戏时在此登记（key 必须与 game.config.ts 一致）。
+// 此文件由 `pnpm sync-games` 根据 games/*/*/game.config.ts 自动生成，请勿手改。
+// 新增游戏后跑一次 `pnpm sync-games` 即可更新注册表。
 import edgeSpace from '../games/douyin/edge-space/game.config';
 import type { GameConfig } from '../games/types';
 
@@ -12,7 +13,7 @@ export function requireGame(gameKey: string): GameConfig {
   const game = games[gameKey];
   if (!game) {
     throw new Error(
-      `未注册的游戏 "${gameKey}"；可用：${gameKeys.join(', ') || '（空）'}`
+      `未注册的游戏 "${gameKey}"；可用：${gameKeys.join(", ") || "（空）"}`
     );
   }
   return game;

@@ -9,6 +9,8 @@ const SUITE_NOTES = {
 
 const state = {
   items: [],
+  tree: [],
+  collapsedChannels: {},
   selected: new Set(),
   selectedSuite: null,
   selectedGame: null,
@@ -45,51 +47,58 @@ async function api(path, options) {
 // ------------------------------------------------------------------ 数据
 
 async function load() {
-  const data = await api('/api/cases');
-  state.items = data.items || [];
+  // 用例列表用于渲染具体文件；游戏树用于渲染左侧先道/游戏（含还没有任何用例的空游戏）
+  const [cases, tree] = await Promise.all([api('/api/cases'), api('/api/game-tree')]);
+  state.items = cases.items || [];
+  state.tree = tree.channels || [];
   const alive = new Set(state.items.map((item) => item.path));
   for (const path of [...state.selected]) {
     if (!alive.has(path)) state.selected.delete(path);
   }
-  const games = new Set(state.items.map((item) => item.game_key));
+  const games = new Set(allGames().map((item) => item.game_key));
   if (state.activeGame && !games.has(state.activeGame)) state.activeGame = null;
+  // 支持 ?game=douyin/xxx 直接定位到某个游戏（可分享、也方便刷新后保持选中）
+  const requested = new URLSearchParams(location.search).get('game');
+  if (!state.activeGame && requested && games.has(requested)) state.activeGame = requested;
   render();
 }
 
-function gamesFromItems() {
-  const map = new Map();
-  for (const item of state.items) {
-    const key = item.game_key || '(未关联)';
-    if (!map.has(key)) {
-      map.set(key, {
-        game_key: key,
-        channel: item.channel,
-        channel_label: item.channel_label || item.channel || '未知渠道',
-        game_name: item.game_name || item.game_dir || key,
-        items: [],
+/** 拍平游戏树，并把该游戏的用例文件挂上去（空游戏 items 为空数组）。 */
+function allGames() {
+  const games = [];
+  for (const channel of state.tree) {
+    for (const game of channel.games) {
+      games.push({
+        ...game,
+        channel_label: channel.label,
+        items: state.items.filter((item) => item.game_key === game.game_key),
       });
     }
-    map.get(key).items.push(item);
   }
-  return [...map.values()].sort((a, b) => a.game_key.localeCompare(b.game_key));
+  return games.sort((a, b) => a.game_key.localeCompare(b.game_key));
+}
+
+function gamesFromItems() {
+  return allGames();
 }
 
 function currentScope() {
-  const games = gamesFromItems();
+  const games = allGames();
   return state.activeGame ? games.filter((game) => game.game_key === state.activeGame) : games;
 }
 
 // ------------------------------------------------------------------ 渲染
 
 function render() {
-  const games = gamesFromItems();
+  const games = allGames();
   renderSidebar(games);
 
   const host = el('suites');
   host.innerHTML = '';
 
   if (!games.length) {
-    host.innerHTML = '<div class="suite-block" style="padding:18px"><span class="hint">还没有任何用例文件。先在左侧选择游戏后点「+ 新增」，或者直接在 games/ 下建目录。</span></div>';
+    host.innerHTML =
+      '<div class="suite-block" style="padding:18px"><span class="hint">还没有任何游戏。在左侧渠道名旁点「+ 新建游戏」开始。</span></div>';
     return;
   }
 
@@ -103,7 +112,8 @@ function render() {
   for (const game of currentScope()) {
     for (const suite of ['smoke', 'explore']) {
       const items = game.items.filter((item) => item.suite === suite);
-      if (!items.length) continue;
+      // 空套件也要渲染：新建的游戏没有任何用例时，用户需要从这里点「+ 新增」
+      if (!items.length && !state.activeGame) continue;
       host.appendChild(suiteBlock(game, suite, items));
     }
   }
@@ -119,24 +129,32 @@ function renderSidebar(games) {
   all.innerHTML = `<span>全部用例</span><span class="count">${state.items.length}</span>`;
   host.appendChild(all);
 
-  const byChannel = new Map();
-  for (const game of games) {
-    const key = game.channel || 'unknown';
-    if (!byChannel.has(key)) byChannel.set(key, { label: game.channel_label, games: [] });
-    byChannel.get(key).games.push(game);
-  }
-
-  for (const [, group] of byChannel) {
+  // 渠道分组：标题可折叠（默认展开），右侧带"+ 新建游戏"
+  for (const channel of state.tree) {
+    const collapsed = state.collapsedChannels[channel.channel] === true;
     const header = document.createElement('div');
     header.className = 'side-channel';
-    header.textContent = group.label;
+    header.innerHTML = `
+      <span class="caret">${collapsed ? '▸' : '▾'}</span>
+      <span class="channel-name">${channel.label}</span>
+      <span class="count">${channel.games.length}</span>
+      <button class="side-add" data-new-game="${channel.channel}" title="在 ${channel.label} 下新建游戏">+</button>
+    `;
+    header.addEventListener('click', (event) => {
+      if (event.target.closest('[data-new-game]')) return;
+      state.collapsedChannels[channel.channel] = !collapsed;
+      render();
+    });
     host.appendChild(header);
-    for (const game of group.games) {
+
+    if (collapsed) continue;
+    for (const game of channel.games) {
       const node = document.createElement('div');
       node.className = 'side-item' + (state.activeGame === game.game_key ? ' active' : '');
       node.dataset.game = game.game_key;
       node.title = game.game_key;
-      node.innerHTML = `<span>${game.game_name}</span><span class="count">${game.items.length}</span>`;
+      const count = game.smoke + game.explore;
+      node.innerHTML = `<span>${game.game_name}</span><span class="count">${count}</span>`;
       host.appendChild(node);
     }
   }
@@ -168,11 +186,20 @@ function suiteBlock(game, suite, items) {
   block.appendChild(head);
 
   if (!collapsed) {
+    if (!items.length) {
+      const empty = document.createElement('div');
+      empty.className = 'case-row';
+      empty.innerHTML =
+        '<span class="hint" style="padding-left:4px">这个套件还没有用例，点右上角「+ 新增」创建第一条。</span>';
+      block.appendChild(empty);
+    }
     for (const item of items) block.appendChild(caseRow(item, game));
     const bar = document.createElement('div');
     bar.className = 'toolbar';
     bar.innerHTML = `
-      <button class="btn-mini" data-select-all="${suite}" data-game="${game.game_key}" ${canRun ? '' : 'disabled'}>全选</button>
+      <button class="btn-mini" data-select-all="${suite}" data-game="${game.game_key}" ${
+        canRun && items.length ? '' : 'disabled'
+      }>全选</button>
       <span class="hint">${
         allSelected
           ? '已全部选中，运行时会自动改用整包模式（复用会话，更快）'
@@ -582,6 +609,87 @@ async function openEditor(path) {
 
 // ------------------------------------------------------------------ 新增 / 删除
 
+function openNewGame(channel) {
+  const info = state.tree.find((item) => item.channel === channel);
+  const label = info ? info.label : channel;
+  const modal = openModal(
+    `<div class="modal-head"><h3>在「${label}」下新建游戏</h3></div>
+     <div class="modal-body">
+       <div class="field"><label>游戏目录名（决定 games/${channel}/&lt;这里&gt;）</label>
+         <input id="ng-dir" placeholder="pop-2048" />
+         <span class="hint">只能用小写字母、数字、连字符，例如 pop-2048</span>
+       </div>
+       <div class="field"><label>游戏中文名</label>
+         <input id="ng-name" placeholder="泡泡2048" />
+         <span class="hint">写进 game.config.ts 的 name，同时用于左侧树显示</span>
+       </div>
+       <div class="field"><label>搜索关键词（留空则用中文名）</label>
+         <input id="ng-keyword" placeholder="泡泡2048" />
+       </div>
+       <div class="field"><label>主菜单判断（menuPrompt，必填）</label>
+         <textarea id="ng-menu" rows="3" placeholder="屏幕上能看到&quot;新游戏&quot;和&quot;继续游戏&quot;这两个菜单文字"></textarea>
+         <span class="hint">描述“看到什么就算进入了游戏主菜单”，尽量写界面上的具体文字或按钮；跑用例时用它判断是否进入成功</span>
+       </div>
+       <div class="msg" id="ng-msg"></div>
+     </div>
+     <div class="modal-foot"><span class="spacer"></span>
+       <button class="btn ghost" data-cancel>取消</button>
+       <button class="btn" data-ok>创建</button>
+     </div>`,
+    true,
+  );
+
+  const msg = modal.querySelector('#ng-msg');
+  const nameInput = modal.querySelector('#ng-name');
+  const keywordInput = modal.querySelector('#ng-keyword');
+  // 中文名填了就把关键词同步过去（用户改过关键词后就不再自动覆盖）
+  let keywordTouched = false;
+  keywordInput.addEventListener('input', () => {
+    keywordTouched = Boolean(keywordInput.value.trim());
+  });
+  nameInput.addEventListener('input', () => {
+    if (!keywordTouched) keywordInput.value = nameInput.value.trim();
+  });
+
+  modal.querySelector('[data-cancel]').addEventListener('click', closeModal);
+  modal.querySelector('[data-ok]').addEventListener('click', async () => {
+    const dir = modal.querySelector('#ng-dir').value.trim();
+    const name = nameInput.value.trim();
+    const menuPrompt = modal.querySelector('#ng-menu').value.trim();
+    if (!menuPrompt) {
+      msg.textContent = '主菜单判断不能为空：它是运行时判断“是否进了游戏”的依据';
+      msg.className = 'msg err';
+      return;
+    }
+    try {
+      const result = await api('/api/games', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          channel,
+          dir,
+          name,
+          keyword: keywordInput.value.trim() || null,
+          menu_prompt: menuPrompt,
+        }),
+      });
+      closeModal();
+      state.activeGame = result.game_key;
+      await load();
+      confirmBox(
+        '游戏已创建',
+        `已生成：<br />· <code>${result.path}</code><br />· <code>${result.explore_case}</code><br /><br />` +
+          '建议先点「运行整个探索用例」验证能否进入。<strong>第一次大概率失败</strong>，' +
+          '失败说明 menuPrompt 与实际界面不符，按报错内容改 game.config.ts 里那一行再跑。',
+        () => {},
+      );
+    } catch (error) {
+      msg.textContent = error.message;
+      msg.className = 'msg err';
+    }
+  });
+}
+
 function openNewCase(suite, gameKey) {
   const games = gamesFromItems();
   const options = games
@@ -676,6 +784,13 @@ document.addEventListener('click', async (event) => {
 
   if (target.id === 'refresh') {
     await load();
+    return;
+  }
+
+  // 渠道行右侧的"+ 新建游戏"
+  const newGameChannel = target.dataset.newGame;
+  if (newGameChannel) {
+    openNewGame(newGameChannel);
     return;
   }
   if (target.id === 'stop') {

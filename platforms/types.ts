@@ -11,4 +11,6 @@ export interface PlatformAdapter {
   searchKeyword(gameName: string): string;
   /** 由关键词生成直达搜索结果页的深链 */
   searchDeepLink(keyword: string): string;
+  /** 由游戏名生成"点哪个入口"的视觉描述（新建游戏时写进 game.config.ts 的 enter.cardPrompt） */
+  cardPrompt(gameName: string): string;
 }

@@ -42,6 +42,7 @@ from .case_index import (
     save_case,
     validate_content,
 )
+from .game_index import create_game, list_channels, list_games as list_game_configs
 from .runner import BusyError, runner
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -609,6 +610,47 @@ def cases_create(payload: CreateCaseRequest) -> dict[str, Any]:
 def cases_delete(path: str = Query(...)) -> dict[str, Any]:
     try:
         return delete_case(path)
+    except CaseError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+# ---------------------------------------------------------------- 游戏目录
+
+
+class CreateGameRequest(BaseModel):
+    channel: str
+    dir: str
+    name: str
+    keyword: str | None = None
+    menu_prompt: str
+
+
+@app.get("/api/game-tree")
+def game_tree() -> dict[str, Any]:
+    """渠道 + 游戏（含还没有任何用例的空游戏）。"""
+    games = list_game_configs()
+    channels = []
+    labels = {item["channel"]: item["label"] for item in list_channels()}
+    for channel, label in labels.items():
+        items = [game for game in games if game["channel"] == channel]
+        channels.append(
+            {
+                "channel": channel,
+                "label": label,
+                "games": items,
+                "case_count": sum(game["smoke"] + game["explore"] for game in items),
+            }
+        )
+    return {"channels": channels, "total_games": len(games)}
+
+
+@app.post("/api/games", status_code=201)
+def create_game_endpoint(payload: CreateGameRequest) -> dict[str, Any]:
+    """新建游戏：生成 game.config.ts + 空 smoke 目录 + explore/01-enter.yaml，并刷新注册表。"""
+    try:
+        return create_game(
+            payload.channel, payload.dir, payload.name, payload.keyword, payload.menu_prompt
+        )
     except CaseError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
 

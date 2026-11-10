@@ -11,6 +11,7 @@
     "dashboard:open": "node scripts/gen-dashboard.mjs --open",
     "postinstall": "midscene-test nodes",
     "validate": "node scripts/validate-cases.mjs",
+    "sync-games": "node scripts/sync-games.mjs",
     "smoke:full": "node scripts/run-full.mjs --project smoke",
     "explore:full": "node scripts/run-full.mjs --project explore",
     "cleanup:codely": "node scripts/cleanup-codely.mjs"

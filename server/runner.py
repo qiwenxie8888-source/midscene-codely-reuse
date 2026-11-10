@@ -256,7 +256,8 @@ class Runner:
         """
         args = ["--project", job.project, "--json"]
         if job.game_key:
-            args += ["--only", f"games/{job.game_key}"]
+            # run-full 会把它翻译成 midscene-test 的 --only games/<game>
+            args += ["--game", job.game_key]
         if job.files:
             total = self._suite_file_count(job.project, job.game_key)
             if total and len(job.files) >= total:
