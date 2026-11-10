@@ -97,7 +97,13 @@ WEB_ROOT = (Path(__file__).resolve().parent / "web").resolve()
 
 
 @app.get("/", include_in_schema=False)
-def index() -> FileResponse:
+def cases_home() -> FileResponse:
+    """首页是用例管理：日常第一步是选用例跑，跑完再去看板。"""
+    return FileResponse(WEB_ROOT / "cases.html")
+
+
+@app.get("/dashboard", include_in_schema=False)
+def dashboard_page() -> FileResponse:
     return FileResponse(WEB_ROOT / "index.html")
 
 
