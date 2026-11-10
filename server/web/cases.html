@@ -8,15 +8,17 @@
     <style>
       .layout { display: flex; gap: 16px; align-items: flex-start; }
       .sidebar { width: 230px; flex: 0 0 230px; background: #fff; border-radius: 12px; padding: 10px; position: sticky; top: 16px; }
-      .side-item { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: 8px; cursor: pointer; font-size: 14px; color: #3a4a5c; }
+      .side-item { display: flex; align-items: center; gap: 8px; padding: 7px 10px 7px 28px; border-radius: 8px; cursor: pointer; font-size: 13px; color: #3a4a5c; }
       .side-item:hover { background: #f2f5f9; }
       .side-item.active { background: #eef4ff; color: #2f6fd0; font-weight: 600; }
       .side-item .count { margin-left: auto; font-size: 12px; color: #9aa4b2; }
-      .side-channel { display: flex; align-items: center; gap: 6px; padding: 10px 10px 4px; font-size: 12px; color: #8b95a5; letter-spacing: 0.04em; cursor: pointer; user-select: none; border-radius: 8px; }
+      /* 渠道是分组标题，游戏缩进在它下面，字号统一为 13px，避免看起来并列 */
+      .side-channel { display: flex; align-items: center; gap: 6px; padding: 12px 10px 4px; font-size: 13px; color: #6b7788; cursor: pointer; user-select: none; border-radius: 8px; }
       .side-channel:hover { background: #f7f9fc; }
-      .side-channel .caret { width: 12px; font-size: 12px; text-align: center; }
+      .side-channel .caret { width: 0; height: 0; border-left: 5px solid transparent; border-right: 5px solid transparent; border-top: 6px solid #9aa4b2; transition: transform 0.15s; transform-origin: center; }
+      .side-channel .caret.collapsed { transform: rotate(-90deg); }
       .side-channel .channel-name { flex: 1; font-weight: 600; }
-      .side-channel .count { color: #9aa4b2; }
+      .side-channel .count { font-size: 12px; color: #9aa4b2; }
       .side-add { border: 1px solid #dde3ec; background: #fff; color: #45526b; border-radius: 6px; width: 20px; height: 20px; line-height: 1; font-size: 14px; cursor: pointer; padding: 0; }
       .side-add:hover { background: #eef4ff; border-color: #b9cffb; color: #2f6fd0; }
       .main { flex: 1; min-width: 0; }

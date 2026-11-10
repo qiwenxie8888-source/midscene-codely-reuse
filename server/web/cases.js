@@ -55,11 +55,13 @@ async function load() {
   for (const path of [...state.selected]) {
     if (!alive.has(path)) state.selected.delete(path);
   }
-  const games = new Set(allGames().map((item) => item.game_key));
-  if (state.activeGame && !games.has(state.activeGame)) state.activeGame = null;
-  // 支持 ?game=douyin/xxx 直接定位到某个游戏（可分享、也方便刷新后保持选中）
+  const games = allGames();
+  const keys = new Set(games.map((item) => item.game_key));
+  if (state.activeGame && !keys.has(state.activeGame)) state.activeGame = null;
+  // 支持 ?game=douyin/xxx 直接定位；没有指定就默认选中第一个游戏（不留"全部"这种中间态）
   const requested = new URLSearchParams(location.search).get('game');
-  if (!state.activeGame && requested && games.has(requested)) state.activeGame = requested;
+  if (!state.activeGame && requested && keys.has(requested)) state.activeGame = requested;
+  if (!state.activeGame && games.length) state.activeGame = games[0].game_key;
   render();
 }
 
@@ -84,7 +86,8 @@ function gamesFromItems() {
 
 function currentScope() {
   const games = allGames();
-  return state.activeGame ? games.filter((game) => game.game_key === state.activeGame) : games;
+  if (!state.activeGame) return games.slice(0, 1);
+  return games.filter((game) => game.game_key === state.activeGame);
 }
 
 // ------------------------------------------------------------------ 渲染
@@ -102,18 +105,9 @@ function render() {
     return;
   }
 
-  if (!state.activeGame) {
-    const tip = document.createElement('div');
-    tip.className = 'notice';
-    tip.textContent = '当前是「全部用例」视图，只用于浏览；运行前请先在左侧选择一个游戏。';
-    host.appendChild(tip);
-  }
-
   for (const game of currentScope()) {
     for (const suite of ['smoke', 'explore']) {
       const items = game.items.filter((item) => item.suite === suite);
-      // 空套件也要渲染：新建的游戏没有任何用例时，用户需要从这里点「+ 新增」
-      if (!items.length && !state.activeGame) continue;
       host.appendChild(suiteBlock(game, suite, items));
     }
   }
@@ -123,19 +117,13 @@ function renderSidebar(games) {
   const host = el('sidebar');
   host.innerHTML = '';
 
-  const all = document.createElement('div');
-  all.className = 'side-item' + (state.activeGame ? '' : ' active');
-  all.dataset.game = '';
-  all.innerHTML = `<span>全部用例</span><span class="count">${state.items.length}</span>`;
-  host.appendChild(all);
-
   // 渠道分组：标题可折叠（默认展开），右侧带"+ 新建游戏"
   for (const channel of state.tree) {
     const collapsed = state.collapsedChannels[channel.channel] === true;
     const header = document.createElement('div');
     header.className = 'side-channel';
     header.innerHTML = `
-      <span class="caret">${collapsed ? '▸' : '▾'}</span>
+      <span class="caret${collapsed ? ' collapsed' : ''}"></span>
       <span class="channel-name">${channel.label}</span>
       <span class="count">${channel.games.length}</span>
       <button class="side-add" data-new-game="${channel.channel}" title="在 ${channel.label} 下新建游戏">+</button>
