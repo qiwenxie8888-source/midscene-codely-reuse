@@ -11,11 +11,12 @@
       .side-item { display: flex; align-items: center; gap: 8px; padding: 7px 10px 7px 28px; border-radius: 8px; cursor: pointer; font-size: 13px; color: #3a4a5c; }
       .side-item:hover { background: #f2f5f9; }
       .side-item.active { background: #eef4ff; color: #2f6fd0; font-weight: 600; }
-      .side-item .count { margin-left: auto; font-size: 12px; color: #9aa4b2; }
-      /* 游戏项的操作图标：默认隐藏，hover 才出现，避免干扰阅读 */
-      .side-item .game-actions { display: none; gap: 2px; margin-left: 6px; }
+      .side-item .right-slot { margin-left: auto; display: flex; align-items: center; justify-content: flex-end; min-width: 52px; }
+      .side-item .count { font-size: 12px; color: #9aa4b2; }
+      /* 游戏项的操作图标：默认隐藏，hover 才出现，避免干扰阅读；与数量同槽位，保证贴行尾且不跳位 */
+      .side-item .game-actions { display: none; gap: 2px; }
       .side-item:hover .game-actions { display: flex; }
-      .side-item:hover .count { display: none; }
+      .side-item:hover .right-slot .count { display: none; }
       .side-icon { border: none; background: transparent; color: #8b95a5; cursor: pointer; font-size: 12px; line-height: 1; padding: 3px 4px; border-radius: 5px; }
       .side-icon:hover { background: #e7ecf4; color: #2f6fd0; }
       .side-icon.danger:hover { background: #fdecea; color: #c0392b; }

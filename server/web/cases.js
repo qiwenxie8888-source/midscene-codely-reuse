@@ -142,12 +142,15 @@ function renderSidebar(games) {
       node.dataset.game = game.game_key;
       node.title = game.game_key;
       const count = game.smoke + game.explore;
+      // 数量与操作图标放在同一个右侧槽位里，保证图标永远贴着行尾、hover 时不会跳位
       node.innerHTML = `
         <span class="game-name">${game.game_name}</span>
-        <span class="count">${count}</span>
-        <span class="game-actions">
-          <button class="side-icon" data-edit-config="${game.config_path}" title="编辑游戏配置 game.config.ts">⚙</button>
-          <button class="side-icon danger" data-delete-game="${game.game_key}" title="删除这个游戏">✕</button>
+        <span class="right-slot">
+          <span class="count">${count}</span>
+          <span class="game-actions">
+            <button class="side-icon" data-edit-config="${game.config_path}" title="编辑游戏配置 game.config.ts">⚙</button>
+            <button class="side-icon danger" data-delete-game="${game.game_key}" title="删除这个游戏">✕</button>
+          </span>
         </span>
       `;
       host.appendChild(node);
