@@ -40,9 +40,10 @@ from .case_index import (
     read_case,
     refresh_index,
     save_case,
+    save_game_config,
     validate_content,
 )
-from .game_index import create_game, list_channels, list_games as list_game_configs
+from .game_index import create_game, delete_game, list_channels, list_games as list_game_configs
 from .runner import BusyError, runner
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -592,6 +593,9 @@ def cases_read(path: str = Query(..., description="相对项目根的用例路�
 @app.put("/api/cases/file")
 def cases_save(payload: SaveCaseRequest) -> dict[str, Any]:
     try:
+        # game.config.ts 是代码，保存后要跑 tsc；用例 YAML 只做语法与节点校验
+        if payload.path.endswith("game.config.ts"):
+            return save_game_config(payload.path, payload.content, payload.expected_hash)
         return save_case(payload.path, payload.content, payload.expected_hash)
     except ConflictError as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
@@ -657,6 +661,15 @@ def create_game_endpoint(payload: CreateGameRequest) -> dict[str, Any]:
         return create_game(
             payload.channel, payload.dir, payload.name, payload.keyword, payload.menu_prompt
         )
+    except CaseError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@app.delete("/api/games")
+def delete_game_endpoint(game_key: str = Query(..., description="渠道/游戏目录")) -> dict[str, Any]:
+    """真删游戏目录（含全部用例）并重算注册表；历史运行记录保留。"""
+    try:
+        return delete_game(game_key)
     except CaseError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
 

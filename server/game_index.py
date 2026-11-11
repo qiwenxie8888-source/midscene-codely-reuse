@@ -48,6 +48,17 @@ def _count_cases(folder: Path) -> int:
     return len(list(folder.glob("*.yaml"))) + len(list(folder.glob("*.yml")))
 
 
+def _game_files(base: Path) -> list[str]:
+    """游戏目录下所有文件的相对路径（供删除确认弹窗展示）。"""
+    if not base.is_dir():
+        return []
+    files = []
+    for path in sorted(base.rglob("*")):
+        if path.is_file():
+            files.append(path.relative_to(PROJECT_ROOT).as_posix())
+    return files
+
+
 def list_games() -> list[dict[str, Any]]:
     """扫描 games/<渠道>/<游戏>/game.config.ts。
 
@@ -75,6 +86,8 @@ def list_games() -> list[dict[str, Any]]:
                 "game_name": name_match.group(1) if name_match else game_dir,
                 "smoke": _count_cases(base / "smoke"),
                 "explore": _count_cases(base / "explore"),
+                "config_path": f"games/{channel}/{game_dir}/game.config.ts",
+                "files": _game_files(base),
             }
         )
     return games
@@ -227,4 +240,52 @@ def create_game(
             "已生成 explore/01-enter.yaml。第一次运行大概率会失败，",
             "这是正常的：请根据报错调整 game.config.ts 里的 menuPrompt。",
         ],
+    }
+
+
+def _sync_registry() -> str:
+    try:
+        result = subprocess.run(
+            ["node", str(SYNC_SCRIPT)],
+            cwd=str(PROJECT_ROOT),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=120,
+        )
+        return (result.stdout or "").strip()
+    except (OSError, subprocess.SubprocessError) as error:
+        raise CaseError(f"运行 sync-games 失败：{error}") from error
+
+
+def delete_game(game_key: str) -> dict[str, Any]:
+    """真删一个游戏目录（含其全部用例），然后重算注册表。
+
+    历史运行记录不动：数据库里的 cases/runs 是历史事实，删掉用例不该抹掉它。
+    """
+    game_key = (game_key or "").strip()
+    channel, _, game_dir = game_key.partition("/")
+    if not channel or not game_dir:
+        raise CaseError(f"游戏标识不合法：{game_key}")
+
+    target = (GAMES_ROOT / channel / game_dir).resolve()
+    try:
+        target.relative_to(GAMES_ROOT.resolve())
+    except ValueError as error:
+        raise CaseError(f"路径越界：{game_key}") from error
+
+    config = target / "game.config.ts"
+    if not config.is_file():
+        raise CaseError(f"游戏不存在：{game_key}")
+
+    files = _game_files(target)
+    shutil.rmtree(target)
+    sync_output = _sync_registry()
+
+    return {
+        "game_key": game_key,
+        "deleted_files": files,
+        "deleted_count": len(files),
+        "sync_output": sync_output,
     }

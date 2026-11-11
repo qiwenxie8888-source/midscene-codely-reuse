@@ -142,7 +142,14 @@ function renderSidebar(games) {
       node.dataset.game = game.game_key;
       node.title = game.game_key;
       const count = game.smoke + game.explore;
-      node.innerHTML = `<span>${game.game_name}</span><span class="count">${count}</span>`;
+      node.innerHTML = `
+        <span class="game-name">${game.game_name}</span>
+        <span class="count">${count}</span>
+        <span class="game-actions">
+          <button class="side-icon" data-edit-config="${game.config_path}" title="编辑游戏配置 game.config.ts">⚙</button>
+          <button class="side-icon danger" data-delete-game="${game.game_key}" title="删除这个游戏">✕</button>
+        </span>
+      `;
       host.appendChild(node);
     }
   }
@@ -492,15 +499,21 @@ function confirmBox(title, message, onConfirm, danger) {
 // ------------------------------------------------------------------ 编辑器
 
 async function openEditor(path) {
+  const isConfig = path.endsWith('game.config.ts');
   const file = await api(`/api/cases/file?path=${encodeURIComponent(path)}`);
   const modal = openModal(
     `<div class="modal-head">
-       <h3>${path.split('/').pop()}</h3>
+       <h3>${isConfig ? '游戏配置' : path.split('/').pop()}</h3>
        <span class="spacer"></span>
        <span class="hint">${path}</span>
        <button class="btn-mini" data-close>关闭</button>
      </div>
      <div class="modal-body">
+       ${
+         isConfig
+           ? '<div class="notice" style="margin-bottom:10px">保存会先跑 TypeScript 编译校验，失败会自动回滚，不会把项目弄坏。改 <code>menuPrompt</code> / <code>name</code> / <code>key</code> 后建议重跑一次探索用例。</div>'
+           : ''
+       }
        <div class="editor-wrap">
          <div class="gutter" id="gutter"></div>
          <textarea id="editor" spellcheck="false"></textarea>
@@ -509,7 +522,7 @@ async function openEditor(path) {
      <div class="modal-foot">
        <span class="msg" id="edit-msg"></span>
        <span class="spacer"></span>
-       <button class="btn ghost" data-validate>校验</button>
+       ${isConfig ? '' : '<button class="btn ghost" data-validate>校验</button>'}
        <button class="btn" data-save>保存</button>
      </div>`,
   );
@@ -548,7 +561,8 @@ async function openEditor(path) {
 
   modal.querySelector('[data-close]').addEventListener('click', closeModal);
 
-  modal.querySelector('[data-validate]').addEventListener('click', async () => {
+  // 游戏配置没有"校验"按钮（YAML 校验不适用），保存时由后端跑 tsc
+  modal.querySelector('[data-validate]')?.addEventListener('click', async () => {
     const result = await api('/api/cases/validate', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -739,6 +753,37 @@ function openNewCase(suite, gameKey) {
   });
 }
 
+function confirmDeleteGame(gameKey) {
+  const game = allGames().find((entry) => entry.game_key === gameKey);
+  if (!game) return;
+  const files = game.files || [];
+  const list = files.length
+    ? files.map((file) => `<li><code>${file.replace(`games/${gameKey}/`, '')}</code></li>`).join('')
+    : '<li>（目录里没有文件）</li>';
+  confirmBox(
+    `删除游戏「${game.game_name}」`,
+    `将<strong>永久删除</strong>以下 ${files.length} 个文件：<br />` +
+      `<ul style="margin:8px 0 0 18px;padding:0;line-height:1.9">${list}</ul>` +
+      '<br />历史运行记录会保留，不受影响。',
+    async () => {
+      try {
+        const result = await api(`/api/games?game_key=${encodeURIComponent(gameKey)}`, {
+          method: 'DELETE',
+        });
+        if (state.activeGame === gameKey) state.activeGame = null;
+        state.selected.clear();
+        state.selectedSuite = null;
+        state.selectedGame = null;
+        await load();
+        alert(`已删除「${game.game_name}」，共移除 ${result.deleted_count} 个文件`);
+      } catch (error) {
+        alert('删除失败：' + error.message);
+      }
+    },
+    true,
+  );
+}
+
 function confirmDelete(item) {
   confirmBox(
     '删除用例',
@@ -779,6 +824,20 @@ document.addEventListener('click', async (event) => {
   const newGameChannel = target.dataset.newGame;
   if (newGameChannel) {
     openNewGame(newGameChannel);
+    return;
+  }
+
+  // 游戏项上的「⚙ 编辑配置」
+  const editConfigPath = target.dataset.editConfig;
+  if (editConfigPath) {
+    openEditor(editConfigPath);
+    return;
+  }
+
+  // 游戏项上的「✕ 删除游戏」
+  const deleteGameKey = target.dataset.deleteGame;
+  if (deleteGameKey) {
+    confirmDeleteGame(deleteGameKey);
     return;
   }
   if (target.id === 'stop') {

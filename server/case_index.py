@@ -15,6 +15,7 @@ from __future__ import annotations
 import hashlib
 import re
 import sqlite3
+import subprocess
 import time
 from pathlib import Path
 from typing import Any
@@ -82,7 +83,10 @@ def relative(path: Path) -> str:
 
 
 def resolve_case_path(rel: str) -> Path:
-    """把接口传来的路径限制在 games/ 下，杜绝路径穿越。"""
+    """把接口传来的路径限制在 games/ 下，杜绝路径穿越。
+
+    允许两类文件：用例 `.yaml/.yml`，以及游戏配置 `game.config.ts`（页面里可直接编辑）。
+    """
     candidate = Path(rel)
     if candidate.is_absolute():
         path = candidate.resolve()
@@ -92,9 +96,15 @@ def resolve_case_path(rel: str) -> Path:
         path.relative_to(GAMES_ROOT)
     except ValueError as error:
         raise CaseError(f"路径不在 games/ 下：{rel}") from error
-    if path.suffix.lower() not in (".yaml", ".yml"):
-        raise CaseError(f"只支持 YAML 用例文件：{rel}")
+    is_yaml = path.suffix.lower() in (".yaml", ".yml")
+    is_game_config = path.name == "game.config.ts"
+    if not (is_yaml or is_game_config):
+        raise CaseError(f"只支持用例 YAML 或 game.config.ts：{rel}")
     return path
+
+
+def is_game_config(path: Path) -> bool:
+    return path.name == "game.config.ts"
 
 
 def load_node_names() -> set[str]:
@@ -396,6 +406,92 @@ def save_case(rel: str, content: str, expected_hash: str | None = None) -> dict[
         "hash": hash_bytes(path.read_bytes()),
         "backup": backup_path,
         "message": result["message"],
+    }
+
+
+# ---------------------------------------------------------------- 游戏配置
+# game.config.ts 是代码不是纯数据：写坏了会让整个项目编译失败。
+# 所以保存流程是"备份 → 写入 → 跑 tsc → 失败自动回滚"。
+
+CONFIG_KEY_RE = re.compile(r"""key:\s*['"]([^'"]+)['"]""")
+CONFIG_CHANNEL_RE = re.compile(r"""channel:\s*['"]([^'"]+)['"]""")
+CONFIG_MENU_RE = re.compile(r"""menuPrompt:\s*['"]([^'"]+)?['"]""")
+
+
+def _run_typecheck() -> tuple[bool, str]:
+    """跑 tsc --noEmit，返回 (是否通过, 输出)。"""
+    try:
+        result = subprocess.run(
+            ["node", str(PROJECT_ROOT / "node_modules" / "typescript" / "bin" / "tsc"), "--noEmit"],
+            cwd=str(PROJECT_ROOT),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=180,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        return False, f"无法运行 tsc：{error}"
+    output = ((result.stdout or "") + (result.stderr or "")).strip()
+    return result.returncode == 0, output
+
+
+def save_game_config(rel: str, content: str, expected_hash: str | None = None) -> dict[str, Any]:
+    """保存 game.config.ts：先做轻量校验，写盘后跑 tsc，失败回滚。"""
+    path = resolve_case_path(rel)
+    if not path.is_file():
+        raise CaseError(f"文件不存在：{rel}")
+
+    current = hash_bytes(path.read_bytes())
+    if expected_hash and expected_hash != current:
+        raise ConflictError("文件已被外部修改，请刷新后再保存")
+
+    # 轻量校验：捕获最常见的三类错误，给出比 tsc 更直白的提示
+    channel_dir = path.parent.parent.name  # games/<渠道>/<游戏>/game.config.ts
+    game_dir = path.parent.name
+    channel_match = CONFIG_CHANNEL_RE.search(content)
+    key_match = CONFIG_KEY_RE.search(content)
+    if not channel_match:
+        raise CaseError("缺少 channel 字段")
+    if channel_match.group(1) != channel_dir:
+        raise CaseError(f"channel 应为 {channel_dir}，与实际目录不一致")
+    if not key_match:
+        raise CaseError("缺少 key 字段")
+    expected_key = f"{channel_dir}/{game_dir}"
+    if key_match.group(1) != expected_key:
+        raise CaseError(f"key 必须与目录一致：应为 {expected_key}")
+    if not (PROJECT_ROOT / "platforms" / f"{channel_dir}.ts").is_file():
+        raise CaseError(f"渠道 {channel_dir} 没有适配器（platforms/{channel_dir}.ts）")
+    if "menuPrompt" not in content:
+        raise CaseError("缺少 menuPrompt 字段（判断是否进入主菜单的依据）")
+
+    backup_path = backup(path, "games-config-edits")
+    with path.open("w", encoding="utf-8", newline="\n") as handle:
+        handle.write(content if content.endswith("\n") else content + "\n")
+
+    passed, output = _run_typecheck()
+    if not passed:
+        # 回滚：把备份写回，保证项目始终能编译
+        path.write_bytes((PROJECT_ROOT / backup_path).read_bytes())
+        detail = output[-1200:] if len(output) > 1200 else output
+        raise CaseError(f"TypeScript 编译失败，已回滚：\n{detail}")
+
+    # 注册表的键取自 config 的 key，改完立刻重算一次保持一致
+    try:
+        subprocess.run(
+            ["node", str(PROJECT_ROOT / "scripts" / "sync-games.mjs")],
+            cwd=str(PROJECT_ROOT),
+            capture_output=True,
+            timeout=120,
+        )
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+    return {
+        "path": relative(path),
+        "hash": hash_bytes(path.read_bytes()),
+        "backup": backup_path,
+        "message": "已保存，TypeScript 编译通过",
     }
 
 
