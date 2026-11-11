@@ -22,6 +22,62 @@ const ADB = process.env.ANDROID_DEVICE_ID
 
 type Agent = NodeExecutionContext<unknown, ProjectContext>['context']['agent'];
 
+/**
+ * 引擎只给内置节点（aiTap/aiAct/…）注册报告快照，defineNode 写的自定义节点默认
+ * 什么都不上报，于是报告里这条用例会显示 "No visual evidence for this attempt"。
+ * 这里补上同样两件事：把本次步骤的 executionId 记成 trace，并注册快照回调。
+ * 返回的 detach 必须在 execute 退出前调用——collector 关闭后再收到 dump 更新会
+ * 因 addTrace 抛错。
+ */
+interface ReportCapableAgent {
+  addDumpUpdateListener?: (
+    listener: (dump: unknown, execution?: { id?: string }) => void
+  ) => (() => void) | void;
+  _createReportSource?: (
+    scopeId: string,
+    executionIds?: readonly string[]
+  ) => Promise<{ sourcePath: string; dumpPath?: string } | undefined>;
+}
+
+function attachStepReport(
+  ctx: NodeExecutionContext<unknown, ProjectContext>,
+  agent: Agent
+): () => void {
+  const capable = agent as ReportCapableAgent;
+  const scopeId =
+    ctx.scope === 'case' ? ctx.case.runId : ctx.document.documentRunId;
+  const executionIds = new Set<string>();
+
+  const remove = capable.addDumpUpdateListener?.((_dump, execution) => {
+    const id = execution?.id;
+    if (!id || executionIds.has(id)) return;
+    executionIds.add(id);
+    try {
+      ctx.report.addTrace({ type: 'midscene-execution', executionId: id });
+    } catch {
+      // 步骤已结束（collector 关闭）时忽略，不影响后续调用
+    }
+  });
+
+  ctx.report.onSnapshot(async (signal, traces) => {
+    signal.throwIfAborted();
+    const ids = traces.length
+      ? traces.map((trace) => trace.executionId)
+      : [...executionIds];
+    // 空数组的含义是"一个都不要"，只有传 undefined 才会取整个会话的快照
+    const source = await capable._createReportSource?.(
+      scopeId,
+      ids.length ? ids : undefined
+    );
+    if (!source) throw new Error('agent 没有返回报告快照');
+    return source;
+  });
+
+  return () => {
+    if (typeof remove === 'function') remove();
+  };
+}
+
 interface ResolvedGame {
   game: GameConfig;
   adapter: PlatformAdapter;
@@ -179,21 +235,24 @@ export const gameEnter = defineNode({
   description:
     '按 gameKey 查游戏配置 → 注入 AI 上下文 → 冷启动宿主 → 深链搜索 → AI 点击游戏卡片 → 等待主菜单',
   inputSchema: gameEnterInputSchema,
-  async execute({
-    input,
-    context,
-  }: NodeExecutionContext<GameEnterInput, ProjectContext>) {
+  async execute(ctx: NodeExecutionContext<GameEnterInput, ProjectContext>) {
+    const { input, context } = ctx;
     const resolved = resolveGame(
       input.gameKey,
       input.profile,
       input.hostPackage
     );
     applyAIContext(context.agent, resolved.game, input.profile);
-    return runEnterChain(context.agent, resolved, {
-      warmupMs: input.warmupMs,
-      pageWaitMs: input.pageWaitMs,
-      waitTimeoutMs: input.waitTimeoutMs,
-    });
+    const detach = attachStepReport(ctx, context.agent);
+    try {
+      return await runEnterChain(context.agent, resolved, {
+        warmupMs: input.warmupMs,
+        pageWaitMs: input.pageWaitMs,
+        waitTimeoutMs: input.waitTimeoutMs,
+      });
+    } finally {
+      detach();
+    }
   },
 });
 
@@ -233,10 +292,8 @@ export const gameEnsure = defineNode<
   description:
     '状态复位：已在游戏主菜单则跳过，否则（可先关弹窗）重走完整进入链',
   inputSchema: gameEnsureInputSchema,
-  async execute({
-    input,
-    context,
-  }: NodeExecutionContext<GameEnsureInput, ProjectContext>) {
+  async execute(ctx: NodeExecutionContext<GameEnsureInput, ProjectContext>) {
+    const { input, context } = ctx;
     const resolved = resolveGame(
       input.gameKey,
       input.profile,
@@ -246,39 +303,45 @@ export const gameEnsure = defineNode<
     // 无论走哪条分支都先注入上下文，保证后续步骤提示词一致
     applyAIContext(agent, resolved.game, input.profile);
 
-    // ① 前台不是宿主 → 一定不在游戏里，直接完整进入（不花模型调用）
-    const foreground = hostInForeground(resolved.hostPackage);
-    if (foreground === false) {
+    // 三条分支都可能调模型，报告快照要覆盖整段判断过程
+    const detach = attachStepReport(ctx, agent);
+    try {
+      // ① 前台不是宿主 → 一定不在游戏里，直接完整进入（不花模型调用）
+      const foreground = hostInForeground(resolved.hostPackage);
+      if (foreground === false) {
+        return runEnterChain(agent, resolved);
+      }
+
+      // ② 视觉判断（一次模型调用）
+      const onMenu = await agent
+        .aiBoolean(onMenuPrompt(resolved.game))
+        .catch(() => false);
+      if (onMenu) {
+        return {
+          summary: `已在《${resolved.game.name}》主界面，跳过进入`,
+          data: { gameKey: resolved.game.key, skipped: true },
+        };
+      }
+
+      // ③ 兜底：先关掉遮挡的弹窗再判一次，仍不在才完整重进
+      await agent
+        .aiAct(
+          '如果屏幕上有弹窗遮挡，点击"拒绝""关闭"或"允许"把它关掉；没有弹窗就不要操作'
+        )
+        .catch(() => {});
+      const afterDismiss = await agent
+        .aiBoolean(onMenuPrompt(resolved.game))
+        .catch(() => false);
+      if (afterDismiss) {
+        return {
+          summary: `关闭弹窗后回到《${resolved.game.name}》主界面`,
+          data: { gameKey: resolved.game.key, skipped: true, dismissed: true },
+        };
+      }
+
       return runEnterChain(agent, resolved);
+    } finally {
+      detach();
     }
-
-    // ② 视觉判断（一次模型调用）
-    const onMenu = await agent
-      .aiBoolean(onMenuPrompt(resolved.game))
-      .catch(() => false);
-    if (onMenu) {
-      return {
-        summary: `已在《${resolved.game.name}》主界面，跳过进入`,
-        data: { gameKey: resolved.game.key, skipped: true },
-      };
-    }
-
-    // ③ 兜底：先关掉遮挡的弹窗再判一次，仍不在才完整重进
-    await agent
-      .aiAct(
-        '如果屏幕上有弹窗遮挡，点击"拒绝""关闭"或"允许"把它关掉；没有弹窗就不要操作'
-      )
-      .catch(() => {});
-    const afterDismiss = await agent
-      .aiBoolean(onMenuPrompt(resolved.game))
-      .catch(() => false);
-    if (afterDismiss) {
-      return {
-        summary: `关闭弹窗后回到《${resolved.game.name}》主界面`,
-        data: { gameKey: resolved.game.key, skipped: true, dismissed: true },
-      };
-    }
-
-    return runEnterChain(agent, resolved);
   },
 });
