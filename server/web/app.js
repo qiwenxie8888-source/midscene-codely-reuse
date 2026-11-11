@@ -27,6 +27,88 @@ const statusDot = (status) => {
   return `<span class="dot ${cls}"></span>`;
 };
 
+// 失败定性只是标注：不改运行状态、不影响通过率，人工可随时改判
+const CAUSE_FALLBACK = {
+  env: '环境问题',
+  stale: '用例过期',
+  case_flaw: '用例缺陷',
+  bug: '产品缺陷',
+  unknown: '待定',
+};
+let causeLabels = { ...CAUSE_FALLBACK };
+
+// 词表真身在 server/causes.py，这里取一次；取不到就用内置兜底
+async function loadCauseCatalog() {
+  try {
+    const data = await getJson('/api/causes');
+    for (const item of data.items) causeLabels[item.key] = item.label;
+  } catch {
+    // 兜底词表已经够用，不打断页面
+  }
+}
+
+const causeSourceLabel = (source) =>
+  source === 'manual' ? '人工' : source === 'ai' ? 'AI' : '规则';
+
+const causeBadge = (item, runId) => {
+  const key = item.cause_category || 'unknown';
+  const label = causeLabels[key] || key;
+  const title = `${label}（${causeSourceLabel(item.cause_source)}）${item.cause_reason || ''}`;
+  return `<button class="cause-badge cause-${esc(key)} source-${esc(item.cause_source || 'rule')}"
+    data-cat="${esc(key)}" data-run="${esc(runId)}" data-path="${esc(item.source_path || '')}"
+    data-index="${esc(item.case_index)}" title="${esc(title)}">${esc(label)}</button>`;
+};
+
+const causeCell = (item, runId) => {
+  if (item.status !== 'failed') return '<span class="cause-cell"></span>';
+  return `<span class="cause-cell" data-run="${esc(runId)}" data-path="${esc(item.source_path || '')}"
+    data-index="${esc(item.case_index)}">${causeBadge(item, runId)}</span>`;
+};
+
+// 改判用原生下拉：选项用完整名称，比一排缩写按钮更好认
+function openCauseEditor(badge) {
+  const cell = badge.closest('.cause-cell');
+  if (!cell) return;
+  const current = badge.dataset.cat || 'unknown';
+  cell.dataset.original = badge.outerHTML;
+  const options = Object.entries(causeLabels)
+    .map(
+      ([key, label]) =>
+        `<option value="${esc(key)}"${key === current ? ' selected' : ''}>${esc(label)}</option>`
+    )
+    .join('');
+  cell.innerHTML = `<span class="cause-edit"><select class="cause-select" aria-label="选择失败原因">${options}</select><button type="button" class="cause-cancel">取消</button></span>`;
+  cell.querySelector('.cause-select')?.focus();
+}
+
+async function applyCause(cell, category) {
+  if (!cell) return;
+  if (!category) {
+    cell.innerHTML = cell.dataset.original || '';
+    return;
+  }
+  try {
+    const response = await fetch('/api/cases/cause', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        run_id: cell.dataset.run,
+        source_path: cell.dataset.path,
+        case_index: Number(cell.dataset.index),
+        category,
+      }),
+    });
+    if (!response.ok) {
+      throw new Error(response.status + ' ' + (await response.text()).slice(0, 120));
+    }
+    const updated = await response.json();
+    cell.innerHTML = causeBadge(updated, updated.run_id);
+  } catch (error) {
+    cell.innerHTML =
+      (cell.dataset.original || '') + `<span class="cause-error">改判失败：${esc(error.message)}</span>`;
+  }
+}
+
 const absTime = (iso) => {
   if (!iso) return '—';
   const date = new Date(iso);
@@ -207,6 +289,7 @@ async function toggleDetail(card) {
                   <span class="name" title="${esc(item.name || '')}">${esc(item.name || '—')}</span>
                   <span class="suite">${esc(item.suite || '—')}</span>
                   <span class="file" title="${esc(item.source_path || '')}">${esc(item.source_path || '—')}</span>
+                  ${causeCell(item, run.run_id)}
                   ${statusBadge(item.status)}
                 </div>`
               )
@@ -230,11 +313,40 @@ $('refresh').addEventListener('click', () => {
 });
 
 $('runs').addEventListener('click', (event) => {
+  // 改判面板优先处理，且不要把点击冒泡成"折叠详情"
+  const cancel = event.target.closest('.cause-cancel');
+  if (cancel) {
+    event.stopPropagation();
+    const cell = cancel.closest('.cause-cell');
+    if (cell) cell.innerHTML = cell.dataset.original || '';
+    return;
+  }
+  if (event.target.closest('.cause-edit')) {
+    event.stopPropagation();
+    return;
+  }
+  const badge = event.target.closest('.cause-badge');
+  if (badge) {
+    event.stopPropagation();
+    openCauseEditor(badge);
+    return;
+  }
   if (event.target.closest('a')) return;
+  // 详情区域内的点击（复制文件名、看错误信息）不该折叠整条运行
+  if (event.target.closest('.run-detail')) return;
   const card = event.target.closest('.run');
   if (card) toggleDetail(card);
 });
 
+// 下拉选中即提交；change 也会冒泡到 #runs
+$('runs').addEventListener('change', (event) => {
+  const select = event.target.closest('.cause-select');
+  if (!select) return;
+  event.stopPropagation();
+  applyCause(select.closest('.cause-cell'), select.value);
+});
+
+loadCauseCatalog();
 loadStats();
 loadGames();
 loadRuns();

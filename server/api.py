@@ -44,6 +44,8 @@ from .case_index import (
     validate_content,
 )
 from .game_index import create_game, delete_game, list_channels, list_games as list_game_configs
+from .causes import CATEGORIES as CAUSE_CATEGORIES
+from .causes import is_valid_category
 from .runner import BusyError, runner
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -61,9 +63,16 @@ async def no_store_for_assets(request, call_next):
     """
     response = await call_next(request)
     content_type = response.headers.get("content-type", "")
-    if content_type.startswith(("text/html", "application/javascript", "text/css")):
+    # 注意：Starlette 的 StaticFiles 给 .js 的类型是 text/javascript（不是 application/javascript），
+    # 只匹配前者会漏掉 JS，浏览器就继续用缓存里的旧文件。
+    cacheable = content_type.startswith(("text/html", "text/css")) or "javascript" in content_type
+    if cacheable:
         response.headers["Cache-Control"] = "no-store, must-revalidate"
         response.headers["Pragma"] = "no-cache"
+        # MutableHeaders 没有 pop()，只能判断存在后 del
+        for name in ("etag", "last-modified"):
+            if name in response.headers:
+                del response.headers[name]
     return response
 
 
@@ -75,6 +84,18 @@ def connect() -> sqlite3.Connection:
             detail=f"数据库不存在：{DB_PATH}；请先运行 python server/ingest.py",
         )
     conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def connect_write() -> sqlite3.Connection:
+    """写连接：失败定性改判要落库，只读连接（mode=ro）用不了。"""
+    if not DB_PATH.exists():
+        raise HTTPException(
+            status_code=503,
+            detail=f"数据库不存在：{DB_PATH}；请先运行 python server/ingest.py",
+        )
+    conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -127,6 +148,8 @@ def api_index() -> dict[str, Any]:
             "/api/runs/{run_id}/log?from=0",
             "POST /api/runs/{run_id}/cancel",
             "/api/games",
+            "/api/causes",
+            "POST /api/cases/cause",
             "/api/stats?game=&days=30",
             "/api/analytics/trend?days=30",
             "/api/analytics/failures?days=30&limit=10",
@@ -217,7 +240,8 @@ def get_run(run_id: str) -> dict[str, Any]:
         cases = to_list(
             conn.execute(
                 "SELECT id, project, suite, game_key, source_path, case_index, name, status, attempts, "
-                "duration_ms, failed_node, failed_phase, error_code, error_message "
+                "duration_ms, failed_node, failed_phase, error_code, error_message, "
+                "cause_category, cause_source, cause_reason, cause_confidence "
                 "FROM cases WHERE run_id = ? ORDER BY case_index, id",
                 (run_id,),
             )
@@ -228,6 +252,59 @@ def get_run(run_id: str) -> dict[str, Any]:
     run["report_url"] = report_url(run.get("report_file"))
     run["cases"] = cases
     return run
+
+
+# ---------------------------------------------------------------- 失败定性
+# 纯标注：只记录"这次失败是环境/过期/用例写法/产品缺陷"，不重跑、不改运行结果
+
+
+class CaseCauseRequest(BaseModel):
+    run_id: str
+    source_path: str
+    case_index: int
+    category: str
+    note: str | None = None
+
+
+@app.get("/api/causes")
+def cause_catalog() -> dict[str, Any]:
+    """分类词表：前端徽章与改判按钮都用它，保证只有一份真身。"""
+    return {
+        "items": [{"key": key, **meta} for key, meta in CAUSE_CATEGORIES.items()]
+    }
+
+
+@app.post("/api/cases/cause")
+def set_case_cause(payload: CaseCauseRequest) -> dict[str, Any]:
+    """人工改判某条用例的失败定性。写死 cause_source='manual'，重跑 ingest 也会保留。"""
+    if not is_valid_category(payload.category):
+        raise HTTPException(status_code=400, detail=f"未知分类：{payload.category}")
+    conn = connect_write()
+    try:
+        cursor = conn.execute(
+            "UPDATE cases SET cause_category = ?, cause_source = 'manual', "
+            "cause_reason = ?, cause_confidence = 1.0 "
+            "WHERE run_id = ? AND source_path = ? AND case_index = ?",
+            (
+                payload.category,
+                payload.note or "人工判定",
+                payload.run_id,
+                payload.source_path,
+                payload.case_index,
+            ),
+        )
+        if cursor.rowcount == 0:
+            raise HTTPException(status_code=404, detail="找不到这条用例记录")
+        conn.commit()
+        row = conn.execute(
+            "SELECT run_id, source_path, case_index, cause_category, cause_source, "
+            "cause_reason, cause_confidence FROM cases "
+            "WHERE run_id = ? AND source_path = ? AND case_index = ?",
+            (payload.run_id, payload.source_path, payload.case_index),
+        ).fetchone()
+    finally:
+        conn.close()
+    return dict(row)
 
 
 @app.get("/api/games")

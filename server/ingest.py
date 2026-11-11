@@ -26,6 +26,13 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+try:  # 包模式：uvicorn server.api:app 时由 api 导入本模块
+    from .causes import CATEGORIES as CAUSE_CATEGORIES
+    from .causes import classify_cause
+except ImportError:  # 脚本模式：python server/ingest.py
+    from causes import CATEGORIES as CAUSE_CATEGORIES
+    from causes import classify_cause
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_RESULT_DIR = PROJECT_ROOT / ".midscene" / "test-results"
 DEFAULT_DB = PROJECT_ROOT / "server" / "data" / "smoke.db"
@@ -77,6 +84,10 @@ CREATE TABLE IF NOT EXISTS cases (
   failed_phase  TEXT,
   error_code    TEXT,
   error_message TEXT,
+  cause_category   TEXT,
+  cause_source     TEXT,
+  cause_reason     TEXT,
+  cause_confidence REAL,
   UNIQUE (run_id, source_path, case_index)
 );
 
@@ -101,6 +112,10 @@ CASE_COLUMNS = [
     ("failed_phase", "TEXT"),
     ("error_code", "TEXT"),
     ("error_message", "TEXT"),
+    ("cause_category", "TEXT"),
+    ("cause_source", "TEXT"),
+    ("cause_reason", "TEXT"),
+    ("cause_confidence", "REAL"),
 ]
 
 
@@ -166,14 +181,19 @@ def read_failure(run_dir: Path, attempt: dict) -> dict:
 
     result: dict = {"duration_ms": detail.get("durationMs")}
 
-    # 依次找第一个失败的步骤；beforeEach 失败时 steps 通常是空的
+    # 依次找真正让用例失败的步骤；beforeEach 失败时 steps 通常是空的。
+    # 标了 continue-on-error 的步骤（continuedAfterError=true）只是"允许失败"，
+    # 不是死因——否则会把被吞掉的超时误当成失败原因。
     for phase in ("beforeEach", "steps", "afterEach"):
-        failed = next(
-            (step for step in (detail.get(phase) or []) if step.get("status") == "failed"),
-            None,
-        )
-        if failed is None:
+        failed_steps = [
+            step for step in (detail.get(phase) or []) if step.get("status") == "failed"
+        ]
+        if not failed_steps:
             continue
+        failed = next(
+            (step for step in failed_steps if not step.get("continuedAfterError")),
+            failed_steps[0],
+        )
         error = failed.get("error") or {}
         message = (error.get("message") or "").strip()
         result.update(
@@ -210,6 +230,22 @@ def parse_summary(summary: dict, run_dir: Path) -> tuple[dict, list[dict]]:
             attempts = case.get("attempts") or []
             failure = read_failure(run_dir, attempts[0]) if attempts else {}
 
+            # 只对失败的用例做规则定性；成功/未跑的行留空
+            cause_category = cause_source = cause_reason = None
+            cause_confidence = None
+            if case.get("status") == "failed":
+                category, reason, confidence = classify_cause(
+                    failure.get("error_code"),
+                    failure.get("error_message"),
+                    failure.get("failed_node"),
+                )
+                cause_category, cause_source, cause_reason, cause_confidence = (
+                    category,
+                    "rule",
+                    reason,
+                    confidence,
+                )
+
             cases.append(
                 {
                     "project": project_name,
@@ -225,6 +261,10 @@ def parse_summary(summary: dict, run_dir: Path) -> tuple[dict, list[dict]]:
                     "failed_phase": failure.get("failed_phase"),
                     "error_code": failure.get("error_code"),
                     "error_message": failure.get("error_message"),
+                    "cause_category": cause_category,
+                    "cause_source": cause_source,
+                    "cause_reason": cause_reason,
+                    "cause_confidence": cause_confidence,
                 }
             )
 
@@ -329,12 +369,53 @@ ON CONFLICT(run_id) DO UPDATE SET
 CASE_INSERT = """
 INSERT OR IGNORE INTO cases (
   run_id, project, suite, game_key, source_path, case_index, name, status, attempts,
-  duration_ms, failed_node, failed_phase, error_code, error_message
+  duration_ms, failed_node, failed_phase, error_code, error_message,
+  cause_category, cause_source, cause_reason, cause_confidence
 ) VALUES (
   :run_id, :project, :suite, :game_key, :source_path, :case_index, :name, :status, :attempts,
-  :duration_ms, :failed_node, :failed_phase, :error_code, :error_message
+  :duration_ms, :failed_node, :failed_phase, :error_code, :error_message,
+  :cause_category, :cause_source, :cause_reason, :cause_confidence
 )
 """
+
+# 人工改判的结论要在重跑 ingest 时保住：先快照，重写完再贴回去
+MANUAL_CAUSE_SELECT = """
+SELECT source_path, case_index, cause_category, cause_reason, cause_confidence
+FROM cases WHERE run_id = ? AND cause_source = 'manual'
+"""
+
+MANUAL_CAUSE_UPDATE = """
+UPDATE cases
+SET cause_category = ?, cause_reason = ?, cause_confidence = ?, cause_source = 'manual'
+WHERE run_id = ? AND source_path = ? AND case_index = ?
+"""
+
+
+def load_manual_causes(
+    conn: sqlite3.Connection, run_id: str
+) -> dict[tuple[str, int], tuple[str | None, str | None, float | None]]:
+    """取出这次运行里已人工改判的行。"""
+    rows = conn.execute(MANUAL_CAUSE_SELECT, (run_id,)).fetchall()
+    return {
+        (row[0], row[1]): (row[2], row[3], row[4])
+        for row in rows
+        if row[0] is not None and row[1] is not None
+    }
+
+
+def restore_manual_causes(
+    conn: sqlite3.Connection,
+    run_id: str,
+    saved: dict[tuple[str, int], tuple[str | None, str | None, float | None]],
+) -> int:
+    """把人工结论贴回重写完的用例行；规则结论不参与，永远可被重算覆盖。"""
+    restored = 0
+    for (source_path, case_index), (category, reason, confidence) in saved.items():
+        cursor = conn.execute(
+            MANUAL_CAUSE_UPDATE, (category, reason, confidence, run_id, source_path, case_index)
+        )
+        restored += cursor.rowcount
+    return restored
 
 
 def ingest(result_dir: Path, db_path: Path, dry_run: bool) -> int:
@@ -377,14 +458,31 @@ def ingest(result_dir: Path, db_path: Path, dry_run: bool) -> int:
             f"总={run['total']} 通过={run['passed']} 失败={run['failed']}  "
             f"用例行={len(cases)}  有失败原因={with_error}  游戏={run['games'] or '-'}"
         )
+        if failures:
+            counts: dict[str, int] = {}
+            for case in cases:
+                if case["status"] != "failed":
+                    continue
+                key = case["cause_category"] or "unknown"
+                counts[key] = counts.get(key, 0) + 1
+            detail = "  ".join(
+                f"{CAUSE_CATEGORIES.get(key, {}).get('label', key)}={value}"
+                for key, value in sorted(counts.items(), key=lambda item: -item[1])
+            )
+            print(f"    定性：{detail}")
         if dry_run:
             ingested += 1
             continue
 
         assert conn is not None
+        # 先记住人工改判过的行，重写完再贴回去（规则结论允许被重算）
+        saved = load_manual_causes(conn, run["run_id"])
         conn.execute("DELETE FROM cases WHERE run_id = ?", (run["run_id"],))
         conn.execute(RUN_INSERT, run)
         conn.executemany(CASE_INSERT, [{**case, "run_id": run["run_id"]} for case in cases])
+        restored = restore_manual_causes(conn, run["run_id"], saved)
+        if restored:
+            print(f"    保留人工定性：{restored} 条")
         ingested += 1
 
     if conn is not None:

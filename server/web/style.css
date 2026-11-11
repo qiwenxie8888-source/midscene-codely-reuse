@@ -162,7 +162,7 @@ h2 { margin: 0; font-size: 14px; font-weight: 600; color: var(--muted); letter-s
 .case-list { display: grid; gap: 6px; }
 .case {
   display: grid;
-  grid-template-columns: 8px minmax(140px, 1.4fr) auto minmax(0, 1.6fr) auto;
+  grid-template-columns: 8px minmax(140px, 1.4fr) auto minmax(0, 1.6fr) auto auto;
   align-items: center;
   gap: 12px;
   padding: 8px 10px;
@@ -177,6 +177,64 @@ h2 { margin: 0; font-size: 14px; font-weight: 600; color: var(--muted); letter-s
 .case .name { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .case .suite, .case .file { color: var(--faint); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .case .file { font-family: Consolas, "Cascadia Mono", monospace; }
+
+/* ---------- 失败定性（只标注，不改结果） ---------- */
+.cause-cell { position: relative; display: flex; justify-content: flex-end; }
+.cause-badge {
+  padding: 2px 9px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+/* 来源区分：规则=无边框，人工改判=同色描边（一眼看出哪些是人定的） */
+.cause-badge.source-manual { border-color: currentColor; }
+.cause-badge:hover { filter: brightness(0.96); }
+.cause-env { background: #e2e8f0; color: #44586e; }
+.cause-stale { background: #fef9c3; color: #713f12; }
+.cause-case_flaw { background: #ffedd5; color: #9a3412; }
+.cause-bug { background: #dc2626; color: #ffffff; }
+.cause-unknown { background: #e4e4e7; color: #52525b; }
+
+/* 改判面板做成浮层：不挤压这一行的列宽，避免其它列左移 */
+.cause-edit {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+  box-shadow: 0 8px 20px rgba(15, 23, 42, 0.12);
+  white-space: nowrap;
+}
+.cause-select {
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+}
+.cause-select:focus { outline: 2px solid rgba(37, 99, 235, 0.35); outline-offset: 1px; }
+.cause-cancel {
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--faint);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.cause-cancel:hover { color: var(--text); }
+.cause-error { margin-left: 6px; color: var(--bad); font-size: 12px; }
 
 /* 筛选 */
 .filters { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
