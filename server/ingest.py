@@ -5,8 +5,11 @@ r"""把 Midscene Test 的运行产物登记进 SQLite（ingest）。
   cases —— 一个用例一行（所属游戏、用例集、用例名、状态、失败原因、耗时）
   games —— 游戏键与展示名（从 game.config.ts 里读 name）
 
-失败原因来自 attempts[].resultFile（每次尝试的步骤明细），提取：
-  失败节点、失败阶段、错误码、错误信息、用例耗时。
+失败原因来自两处：attempts[].resultFile（用例级失败）和 documents[].resultFile
+（beforeAll/afterAll 失败——这时用例根本没跑，summary 里记成 notRun），提取：
+  失败节点、失败阶段、错误码、错误信息摘要、完整观察文本（error_detail）、
+  失败步骤的 dump（复制到 server/data/failure-dumps，避免被清理删掉）、
+  失败步骤时间窗内的最后一张截图（evidence_shot）。
 
 幂等：同一个 run_id 重复导入会先删旧行再写新行，不会产生重复数据。
 不调用任何模型、不连设备，纯本地解析。
@@ -21,9 +24,11 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import shutil
 import sqlite3
 import sys
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 
 try:  # 包模式：uvicorn server.api:app 时由 api 导入本模块
@@ -36,6 +41,17 @@ except ImportError:  # 脚本模式：python server/ingest.py
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_RESULT_DIR = PROJECT_ROOT / ".midscene" / "test-results"
 DEFAULT_DB = PROJECT_ROOT / "server" / "data" / "smoke.db"
+REPORT_ROOT = PROJECT_ROOT / "midscene_run" / "report"
+# 失败步骤的 dump 会被 clean_runs --purge-loose 删掉，所以 ingest 时先复制一份
+DUMPS_ROOT = PROJECT_ROOT / "server" / "data" / "failure-dumps"
+
+# 报告里每条截图引用都带 capturedAt 与相对路径；同一张图可能被引用多次
+SHOT_REF = re.compile(
+    r'"capturedAt":(\d{13}),"mimeType":"image/(?:jpeg|png)",'
+    r'"storage":"file","path":"(\./screenshots/[^"]+)"'
+)
+# 完整观察文本只用于归因与人工复核，截断时保留尾部（真死因通常写在最后）
+ERROR_DETAIL_LIMIT = 4000
 
 # games/<渠道>/<游戏>/<用例集>/xxx.yaml
 GAME_PATH = re.compile(r"^games/([^/]+)/([^/]+)/([^/]+)/")
@@ -116,6 +132,9 @@ CASE_COLUMNS = [
     ("cause_source", "TEXT"),
     ("cause_reason", "TEXT"),
     ("cause_confidence", "REAL"),
+    ("error_detail", "TEXT"),
+    ("evidence_shot", "TEXT"),
+    ("evidence_dump", "TEXT"),
 ]
 
 
@@ -168,7 +187,157 @@ def classify(
     return None, None
 
 
-def read_failure(run_dir: Path, attempt: dict) -> dict:
+def truncate_tail(text: str, limit: int) -> str:
+    """超长文本保留尾部——失败原因通常写在最后一句。"""
+    if len(text) <= limit:
+        return text
+    omitted = len(text) - limit
+    return f"…（前 {omitted} 字已省略）\n{text[-limit:]}"
+
+
+def error_chain_text(error: dict | None) -> str | None:
+    """把 error.message 连同 cause 链拼成一段可读证据。
+
+    外层 message 常是 `Node "x" failed: <原因>`，cause 里是同一个原因的全文，
+    所以被包含的重复段落要丢掉；同时把各层错误码记在末尾，便于规则匹配。
+    """
+    messages: list[str] = []
+    codes: list[str] = []
+    node = error if isinstance(error, dict) else {}
+    for _ in range(5):
+        message = str(node.get("message") or "").strip()
+        code = node.get("code") or node.get("name")
+        if code:
+            codes.append(str(code))
+        if message:
+            kept = [item for item in messages if item not in message]
+            if len(kept) == len(messages) and any(message in item for item in messages):
+                pass  # 新消息已被更长的旧消息覆盖
+            else:
+                messages = kept
+                messages.append(message)
+        node = node.get("cause") if isinstance(node.get("cause"), dict) else {}
+        if not node:
+            break
+    if not messages:
+        return None
+    text = "\n[cause] ".join(messages)
+    if codes:
+        text = f"{text}\n[codes] {' > '.join(dict.fromkeys(codes))}"
+    return truncate_tail(text, ERROR_DETAIL_LIMIT)
+
+
+@lru_cache(maxsize=8)
+def load_shot_refs(html_path: str) -> dict[str, int]:
+    """解析 e2e 报告里的截图引用：相对路径 -> 截图时间戳（毫秒）。
+
+    报告是几 MB 的打包页面，按运行缓存一次即可；同一张图会被引用多次，按路径去重。
+    """
+    try:
+        text = Path(html_path).read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return {}
+    refs: dict[str, int] = {}
+    for match in SHOT_REF.finditer(text):
+        captured, relative = int(match.group(1)), match.group(2)
+        refs[relative] = max(refs.get(relative, 0), captured)
+    return refs
+
+
+def parse_epoch_ms(value: str | None) -> int | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return int(parsed.timestamp() * 1000)
+
+
+def find_failure_shot(
+    report_file: str | Path | None,
+    started_at: str | None,
+    ended_at: str | None,
+) -> str | None:
+    """在 e2e 报告里找失败步骤时间窗内的最后一张截图。
+
+    返回相对报告根目录的路径（`/reports` 静态挂载可直接访问）。
+    命中不了返回 None：旧报告、早期自定义节点都可能没有图，调用方不要当错误。
+    """
+    if not report_file:
+        return None
+    start = parse_epoch_ms(started_at)
+    end = parse_epoch_ms(ended_at)
+    if start is None or end is None:
+        return None
+    html_path = Path(report_file)
+    refs = load_shot_refs(str(html_path))
+    hits = [
+        (captured, relative)
+        for relative, captured in refs.items()
+        if start - 1000 <= captured <= end + 1000
+    ]
+    if not hits:
+        return None
+    _, relative = max(hits)
+    return f"{html_path.parent.name}/{relative.removeprefix('./')}"
+
+
+def save_dump_sources(run_id: str, sources: list | None) -> str | None:
+    """把失败步骤的 dump 复制到 server/data/failure-dumps/<runId>/。
+
+    dump 会被 clean_runs --purge-loose 删掉，所以必须在 ingest（清理之前）留存。
+    一个步骤可能有多份（多个 execution），存成 JSON 数组文本；一份都没存到就返回 None。
+    """
+    saved: list[str] = []
+    target = DUMPS_ROOT / run_id
+    for source in sources or []:
+        raw = source.get("dumpPath") if isinstance(source, dict) else None
+        if not raw:
+            continue
+        dump = Path(raw)
+        if not dump.exists():
+            continue
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+            dest = target / dump.name
+            if not dest.exists():
+                shutil.copy2(dump, dest)
+            saved.append(dest.relative_to(PROJECT_ROOT).as_posix())
+        except OSError:
+            continue
+    return json.dumps(saved, ensure_ascii=False) if saved else None
+
+
+def failure_from_step(
+    run_id: str,
+    phase: str,
+    failed: dict,
+    report_file: str | Path | None,
+) -> dict:
+    """把一个失败步骤转成入库字段（用例级与文档级共用）。"""
+    error = failed.get("error") or {}
+    message = (error.get("message") or "").strip()
+    return {
+        "failed_phase": phase,
+        "failed_node": failed.get("node"),
+        "error_code": error.get("code") or error.get("name"),
+        "error_message": message[:500] or None,
+        "error_detail": error_chain_text(error),
+        "evidence_dump": save_dump_sources(run_id, (failed.get("report") or {}).get("sources")),
+        "evidence_shot": find_failure_shot(
+            report_file, failed.get("startedAt"), failed.get("endedAt")
+        ),
+    }
+
+
+def read_failure(
+    run_dir: Path,
+    attempt: dict,
+    report_file: str | Path | None = None,
+) -> dict:
     """从 attempt 的 resultFile 里提取失败原因与耗时。取不到就返回空字典。"""
     relative = attempt.get("resultFile")
     if not relative:
@@ -194,22 +363,63 @@ def read_failure(run_dir: Path, attempt: dict) -> dict:
             (step for step in failed_steps if not step.get("continuedAfterError")),
             failed_steps[0],
         )
-        error = failed.get("error") or {}
-        message = (error.get("message") or "").strip()
-        result.update(
-            failed_phase=phase,
-            failed_node=failed.get("node"),
-            error_code=error.get("code") or error.get("name"),
-            error_message=message[:500] or None,
-        )
+        result.update(failure_from_step(run_dir.name, phase, failed, report_file))
         break
 
     return result
 
 
+def read_document_failure(
+    run_dir: Path,
+    document: dict,
+    report_file: str | Path | None = None,
+) -> dict:
+    """beforeAll/afterAll 失败时，证据在 document.json 里而不是 attempts 里。
+
+    这类失败意味着用例根本没跑（summary 里记成 notRun），但"进不去游戏"恰恰是最常见的
+    失败形态，不覆盖它归因体系就是瞎的：summary.cases[].attempts 为空，只有这里能拿到
+    错误码与模型当时的观察文本。
+    """
+    relative = document.get("resultFile")
+    if not relative:
+        return {}
+    try:
+        detail = json.loads((run_dir / relative).read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+    for phase in ("beforeAll", "beforeEach", "afterAll"):
+        failed_steps = [
+            step for step in (detail.get(phase) or []) if step.get("status") == "failed"
+        ]
+        if not failed_steps:
+            continue
+        failed = next(
+            (step for step in failed_steps if not step.get("continuedAfterError")),
+            failed_steps[0],
+        )
+        failure = failure_from_step(run_dir.name, phase, failed, report_file)
+        # 用例没跑，耗时只能取失败步骤自己的
+        failure["duration_ms"] = failed.get("durationMs")
+        # 文档级步骤没有 step.report，dump 挂在 document 的 reportSources 上
+        if not failure.get("evidence_dump"):
+            failure["evidence_dump"] = save_dump_sources(
+                run_dir.name, detail.get("reportSources")
+            )
+        return failure
+    return {}
+
+
 def parse_summary(summary: dict, run_dir: Path) -> tuple[dict, list[dict]]:
     stats = summary.get("summary") or {}
     projects = summary.get("projects") or []
+
+    # summary 里的 report 是相对本次运行目录的路径（如 ../../../midscene_run/report/...），
+    # 失败截图要从这个 e2e 报告的 screenshots 里找，所以先算出来
+    report_file: str | None = None
+    report = summary.get("report")
+    if report:
+        report_file = str((run_dir / report).resolve())
 
     cases: list[dict] = []
     games: set[str] = set()
@@ -228,7 +438,7 @@ def parse_summary(summary: dict, run_dir: Path) -> tuple[dict, list[dict]]:
                 games.add(game_key)
 
             attempts = case.get("attempts") or []
-            failure = read_failure(run_dir, attempts[0]) if attempts else {}
+            failure = read_failure(run_dir, attempts[0], report_file) if attempts else {}
 
             # 只对失败的用例做规则定性；成功/未跑的行留空
             cause_category = cause_source = cause_reason = None
@@ -261,6 +471,9 @@ def parse_summary(summary: dict, run_dir: Path) -> tuple[dict, list[dict]]:
                     "failed_phase": failure.get("failed_phase"),
                     "error_code": failure.get("error_code"),
                     "error_message": failure.get("error_message"),
+                    "error_detail": failure.get("error_detail"),
+                    "evidence_shot": failure.get("evidence_shot"),
+                    "evidence_dump": failure.get("evidence_dump"),
                     "cause_category": cause_category,
                     "cause_source": cause_source,
                     "cause_reason": cause_reason,
@@ -268,11 +481,37 @@ def parse_summary(summary: dict, run_dir: Path) -> tuple[dict, list[dict]]:
                 }
             )
 
-    report = summary.get("report")
-    report_file = None
-    if report:
-        # summary 里的 report 是相对本次运行目录的路径（如 ../../../midscene_run/report/...）
-        report_file = str((run_dir / report).resolve())
+        # beforeAll/afterAll 失败时用例是 notRun，证据只在 document.json 里；
+        # 这里把错误信息贴到同一 source_path 的行上，但**不改 status**——
+        # 改了会让用例级统计和 summary.json 对不上，而这段数据只服务于归因。
+        for document in project.get("documents") or []:
+            if document.get("status") != "failed":
+                continue
+            lifecycle = read_document_failure(run_dir, document, report_file)
+            if not lifecycle:
+                continue
+            document_path = (document.get("sourcePath") or "").lstrip("/")
+            document_name = Path(document_path).name
+            for case in cases:
+                # 单文件模式下 summary 里只剩文件名，目录模式下才是完整路径，
+                # 所以两种形态都要能对上
+                case_path = case.get("source_path") or ""
+                if case.get("error_code"):
+                    continue
+                if case_path != document_path and Path(case_path).name != document_name:
+                    continue
+                case.update(lifecycle)
+                category, reason, confidence = classify_cause(
+                    lifecycle.get("error_code"),
+                    lifecycle.get("error_message"),
+                    lifecycle.get("failed_node"),
+                )
+                case.update(
+                    cause_category=category,
+                    cause_source="rule",
+                    cause_reason=reason,
+                    cause_confidence=confidence,
+                )
 
     run = {
         "run_id": summary.get("runId") or run_dir.name,
@@ -370,10 +609,12 @@ CASE_INSERT = """
 INSERT OR IGNORE INTO cases (
   run_id, project, suite, game_key, source_path, case_index, name, status, attempts,
   duration_ms, failed_node, failed_phase, error_code, error_message,
+  error_detail, evidence_shot, evidence_dump,
   cause_category, cause_source, cause_reason, cause_confidence
 ) VALUES (
   :run_id, :project, :suite, :game_key, :source_path, :case_index, :name, :status, :attempts,
   :duration_ms, :failed_node, :failed_phase, :error_code, :error_message,
+  :error_detail, :evidence_shot, :evidence_dump,
   :cause_category, :cause_source, :cause_reason, :cause_confidence
 )
 """

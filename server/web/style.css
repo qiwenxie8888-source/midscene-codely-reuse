@@ -357,3 +357,53 @@ a:hover { text-decoration: underline; }
 .compare-summary b.ok { color: var(--ok); }
 .compare-summary b.warn { color: var(--warn); }
 .compare-summary .sep { color: var(--faint); }
+
+/* ---- 失败证据卡片（A3）：规则结论 / AI 建议 / 观察原文 / 失败截图 ---- */
+.case-block { display: flex; flex-direction: column; width: 100%; }
+.ev-card {
+  margin: 2px 0 12px 22px; padding: 14px 16px;
+  background: #fbfcfe; border: 1px solid var(--line); border-radius: 10px;
+}
+.ev-head {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  font-size: 12.5px; color: var(--muted); margin-bottom: 12px;
+}
+.ev-head strong { color: var(--text); font-size: 13px; }
+.ev-head .sep { color: #cbd5e1; }
+.ev-head code { font-size: 12px; color: #475569; }
+.ev-grid { display: grid; grid-template-columns: 1fr 1.4fr; gap: 12px; }
+.ev-block { padding: 12px; border-radius: 8px; background: #fff; border: 1px solid var(--line); }
+.ev-block.is-ai { border-style: dashed; border-color: #c7d2e5; background: #fcfdff; }
+.ev-label {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  font-size: 12px; color: var(--muted); margin-bottom: 8px;
+}
+.ev-tag {
+  font-size: 11px; padding: 1px 6px; border-radius: 999px;
+  background: #eef2f7; color: #475569; border: 1px solid #dbe3ee;
+}
+.ev-tag.ev-diff { background: #fef2f2; color: #b91c1c; border-color: #fecaca; }
+.ev-block p { margin: 8px 0 0; font-size: 13px; line-height: 1.6; color: var(--text); }
+.ev-block p.ev-muted { color: var(--faint); font-size: 12.5px; }
+.ev-block blockquote {
+  margin: 10px 0 0; padding: 8px 10px; border-left: 3px solid #cbd5e1;
+  background: #f8fafc; color: #475569; font-size: 12.5px; line-height: 1.55;
+}
+.ev-block .conf { color: var(--faint); font-size: 11.5px; margin-left: 4px; font-weight: 400; }
+.badge-dashed { border: 1px dashed currentColor; }
+.ev-shot { display: flex; align-items: center; gap: 10px; margin-top: 12px; }
+.ev-shot img {
+  max-height: 150px; max-width: 100%; border-radius: 6px;
+  border: 1px solid var(--line); display: block;
+}
+.ev-raw { margin-top: 12px; }
+.ev-raw summary { cursor: pointer; font-size: 12.5px; color: var(--muted); }
+.ev-raw pre {
+  margin: 8px 0 0; padding: 10px 12px; max-height: 160px; overflow: auto;
+  background: #0f172a; color: #e2e8f0; border-radius: 8px;
+  font-size: 12px; line-height: 1.6; white-space: pre-wrap;
+}
+@media (max-width: 720px) {
+  .ev-grid { grid-template-columns: 1fr; }
+  .ev-card { margin-left: 0; }
+}

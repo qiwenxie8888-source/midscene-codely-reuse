@@ -260,6 +260,66 @@ async function loadRuns() {
   }
 }
 
+// 失败证据卡片：规则结论、AI 建议、观察原文、失败截图并排，人工下拉仍在行内
+const evidenceCard = (item) => {
+  if (!item.error_code && !item.error_detail) return '';
+  const detail = item.error_detail || item.error_message || '';
+  const shot = item.evidence_shot ? `/reports/${item.evidence_shot}` : null;
+  const ruleKey = item.cause_category || 'unknown';
+  const ruleLabel = causeLabels[ruleKey] || ruleKey;
+  const aiKey = item.ai_category;
+  const aiLabel = aiKey ? causeLabels[aiKey] || aiKey : null;
+  const different = item.ai_agreement === 'different';
+  const lifecycle = item.status !== 'failed';
+  return `<div class="ev-card">
+    <div class="ev-head">
+      <strong>失败证据</strong>
+      <span class="sep">·</span><span>${esc(item.failed_phase || '—')}</span>
+      <span class="sep">·</span><span><code>${esc(item.failed_node || '—')}</code></span>
+      <span class="sep">·</span><span><code>${esc(item.error_code || '—')}</code></span>
+      ${lifecycle ? '<span class="ev-tag">生命周期失败，用例未执行</span>' : ''}
+      ${different ? '<span class="ev-tag ev-diff">与规则不一致</span>' : ''}
+    </div>
+    <div class="ev-grid">
+      <div class="ev-block">
+        <div class="ev-label">规则结论 <span class="ev-tag">自动 · 免费</span></div>
+        <span class="cause-badge cause-${esc(ruleKey)}">${esc(ruleLabel)}${
+          item.cause_confidence == null ? '' : `<span class="conf">${esc(item.cause_confidence)}</span>`
+        }</span>
+        <p>${esc(item.cause_reason || '—')}</p>
+      </div>
+      <div class="ev-block is-ai">
+        <div class="ev-label">AI 建议 ${
+          aiLabel ? '<span class="ev-tag">仅建议 · 不影响通过率</span>' : '<span class="ev-tag">未判</span>'
+        }</div>
+        ${
+          aiLabel
+            ? `<span class="cause-badge cause-${esc(aiKey)} badge-dashed">${esc(aiLabel)}${
+                item.ai_confidence == null ? '' : `<span class="conf">${esc(item.ai_confidence)}</span>`
+              }</span>
+               <p>${esc(item.ai_reason || '')}</p>
+               ${item.ai_evidence ? `<blockquote>证据原文：${esc(item.ai_evidence)}</blockquote>` : ''}`
+            : `<p class="ev-muted">${esc(item.ai_error || '还没跑 AI 初判（python server/attribute.py --replay）')}</p>`
+        }
+        ${aiLabel && item.ai_error ? `<p class="ev-muted">本轮丢弃原因：${esc(item.ai_error)}</p>` : ''}
+      </div>
+    </div>
+    ${
+      shot
+        ? `<div class="ev-shot"><a href="${esc(shot)}" target="_blank" rel="noreferrer">
+             <img src="${esc(shot)}" loading="lazy" alt="失败瞬间截图"></a>
+             <span class="conf">失败瞬间截图，点开看原图</span></div>`
+        : ''
+    }
+    ${
+      detail
+        ? `<details class="ev-raw"><summary>模型观察原文（${detail.length} 字）</summary>
+             <pre>${esc(detail)}</pre></details>`
+        : ''
+    }
+  </div>`;
+};
+
 async function toggleDetail(card) {
   const detail = card.querySelector('.run-detail');
   if (!detail) return;
@@ -284,13 +344,16 @@ async function toggleDetail(card) {
         cases.length
           ? `<div class="case-list">${cases
               .map(
-                (item) => `<div class="case">
-                  ${statusDot(item.status)}
-                  <span class="name" title="${esc(item.name || '')}">${esc(item.name || '—')}</span>
-                  <span class="suite">${esc(item.suite || '—')}</span>
-                  <span class="file" title="${esc(item.source_path || '')}">${esc(item.source_path || '—')}</span>
-                  ${causeCell(item, run.run_id)}
-                  ${statusBadge(item.status)}
+                (item) => `<div class="case-block">
+                  <div class="case">
+                    ${statusDot(item.status)}
+                    <span class="name" title="${esc(item.name || '')}">${esc(item.name || '—')}</span>
+                    <span class="suite">${esc(item.suite || '—')}</span>
+                    <span class="file" title="${esc(item.source_path || '')}">${esc(item.source_path || '—')}</span>
+                    ${causeCell(item, run.run_id)}
+                    ${statusBadge(item.status)}
+                  </div>
+                  ${evidenceCard(item)}
                 </div>`
               )
               .join('')}</div>`

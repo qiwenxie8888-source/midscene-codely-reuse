@@ -237,12 +237,34 @@ def get_run(run_id: str) -> dict[str, Any]:
         if row is None:
             raise HTTPException(status_code=404, detail=f"run 不存在：{run_id}")
         run = dict(row)
+        # 模型初判放在独立表里，ingest 的"删了重写"碰不到它；表还没建时降级成不 join
+        has_ai = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='case_ai_causes'"
+        ).fetchone()
+        ai_columns = (
+            "ai.category AS ai_category, ai.reason AS ai_reason, "
+            "ai.evidence_quote AS ai_evidence, ai.confidence AS ai_confidence, "
+            "ai.ai_error AS ai_error, ai.checked_at AS ai_checked_at, "
+            "ai.agreement AS ai_agreement, ai.rule_category AS ai_rule_category"
+            if has_ai
+            else "NULL AS ai_category, NULL AS ai_reason, NULL AS ai_evidence, "
+            "NULL AS ai_confidence, NULL AS ai_error, NULL AS ai_checked_at, "
+            "NULL AS ai_agreement, NULL AS ai_rule_category"
+        )
+        ai_join = (
+            "LEFT JOIN case_ai_causes ai ON ai.run_id = c.run_id "
+            "AND ai.source_path = c.source_path AND ai.case_index = c.case_index"
+            if has_ai
+            else ""
+        )
         cases = to_list(
             conn.execute(
-                "SELECT id, project, suite, game_key, source_path, case_index, name, status, attempts, "
-                "duration_ms, failed_node, failed_phase, error_code, error_message, "
-                "cause_category, cause_source, cause_reason, cause_confidence "
-                "FROM cases WHERE run_id = ? ORDER BY case_index, id",
+                "SELECT c.id, c.project, c.suite, c.game_key, c.source_path, c.case_index, "
+                "c.name, c.status, c.attempts, c.duration_ms, c.failed_node, c.failed_phase, "
+                "c.error_code, c.error_message, c.error_detail, c.evidence_shot, c.evidence_dump, "
+                "c.cause_category, c.cause_source, c.cause_reason, c.cause_confidence, "
+                f"{ai_columns} "
+                f"FROM cases c {ai_join} WHERE c.run_id = ? ORDER BY c.case_index, c.id",
                 (run_id,),
             )
         )
