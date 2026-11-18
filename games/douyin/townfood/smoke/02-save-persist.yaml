@@ -1,0 +1,128 @@
+# 冒烟 02：存档——杀宿主冷启动重进，资源没有回退到零
+#
+# 判定口径是"未回档"而不是"数值完全相等"：这是挂机经营游戏，主界面停留两分钟
+# 金币就从 444,200 涨到 476,200、粉丝 2,064 → 2,066，严格相等必然误报。
+# 因此前后各抓一次快照写进报告（人工对比），断言只看"有没有掉回新手零档"。
+#
+# vConsole 是游戏自带的调试面板（右下角绿色按钮），里面的
+# [DataManager]保存云存档 / [CloudSave] Update file to UOS successfully, saveId=...
+# 是判断"存档到底有没有写出去/读回来"的直接证据。yaml 没有分支能力，
+# 只能杀掉前和重进后各抓一次，不能只在失败时抓。
+beforeAll:
+  - game.ensure:
+      gameKey: douyin/townfood
+
+cases:
+  - name: 存档-杀宿主冷启动重进资源未回档
+    steps:
+      # ---------- 第一段：杀掉宿主前的基线快照 ----------
+      # 只取顶部资源栏四个数：金币/钻石/南瓜/粉丝。分开取，避免模型把两列数字串行
+      - aiQuery:
+          prompt:
+            money: 屏幕顶部钞票图标右侧的金币数值，只填数字并去掉千分位逗号，例如 476200
+            diamond: 屏幕顶部紫色钻石图标右侧的数值，只填数字
+            pumpkin: 屏幕顶部南瓜篮子图标右侧的数值，没有就填 0
+            fans: 屏幕左上角头像下方紫色"粉丝"标签的粉丝数，只填数字
+          $:
+            timeout: 120000
+
+      - recordToReport:
+          title: 存档基线快照（杀宿主前，需人工对比）
+          options:
+            content: |-
+              上面 aiQuery 步骤的 data 是本轮杀宿主前的资源基线。
+              判定标准：重进后金币仍在十万以上（六位数）、钻石不少于 300、粉丝不少于 1000，
+              即视为存档没有回退到零。若重进后三项里任意一项变成个位数/0，
+              就对照本条用例"重进后"的 vConsole 日志看是读档失败还是写档丢失。
+              注意金币会自然增长，重进后略微变大属正常，不算异常。
+
+      # ---------- 第二段：杀掉前先把云存档日志抓下来 ----------
+      # 这一步的意义是证明"杀之前存档确实写出去过"：
+      # 若杀前日志里就有 CloudSave 上传失败，重进丢档的锅在写侧，不在读侧
+      - aiTap:
+          prompt: 屏幕右下角、底部按钮栏右侧那个绿色圆角矩形按钮，上面写着白色"vConsole"
+          $:
+            timeout: 60000
+      - aiWaitFor:
+          prompt: 出现了 vConsole 调试面板：顶部有"Log""System"标签，下面一行有"All""Log""Info""Warn""Error"筛选项
+          options:
+            timeoutMs: 15000
+          $:
+            continue-on-error: true
+      - aiQuery:
+          prompt:
+            cloudSaveLogs: 面板 Log 列表里所有包含"云存档""CloudSave""DataManager""UOS"的日志，逐条原样抄写（保留数字和 saveId），一条都没有就填"无存档相关日志"
+          $:
+            timeout: 120000
+      - aiAct:
+          prompt: 点击 vConsole 面板右下角的绿色"vConsole"悬浮按钮，把面板收起，回到游戏主界面
+          $:
+            timeout: 120000
+      - aiWaitFor:
+          prompt: vConsole 面板已经收起，能重新看到游戏底部的"店铺管理""街道""商店"按钮和顶部的金币钻石数值
+          options:
+            timeoutMs: 20000
+          $:
+            continue-on-error: true
+
+      # ---------- 第三段：等云存档落盘再杀 ----------
+      # 实测日志里 [DataManager]云存档CD 是 18.8 秒，杀太快会在"还没写出去"时打断，
+      # 得到的丢档是测试自己造成的假阳性
+      - wait:
+          duration: 40
+          unit: s
+      - runAdbShell: am force-stop com.ss.android.ugc.aweme
+      - wait:
+          duration: 30
+          unit: s
+      # 必须用 game.enter 强制重进：game.ensure 会因为"已在主界面"而跳过，
+      # 而本用例验的正是冷启动读档
+      - game.enter:
+          gameKey: douyin/townfood
+
+      # ---------- 第四段：重进后的快照 + 现场日志 ----------
+      # 先抓数值再开 vConsole：面板会盖住整个屏幕，盖住后就看不到资源栏了
+      - aiQuery:
+          prompt:
+            money: 屏幕顶部钞票图标右侧的金币数值，只填数字并去掉千分位逗号，例如 476200
+            diamond: 屏幕顶部紫色钻石图标右侧的数值，只填数字
+            pumpkin: 屏幕顶部南瓜篮子图标右侧的数值，没有就填 0
+            fans: 屏幕左上角头像下方紫色"粉丝"标签的粉丝数，只填数字
+            newbieGuide: 屏幕上是否出现了新手引导/首次进入的欢迎弹窗或教学提示（"是"或"否"）
+          $:
+            timeout: 120000
+
+      # 丢档时这份日志就是第一现场，必须在本用例断言失败之前抓到
+      - aiTap:
+          prompt: 屏幕右下角、底部按钮栏右侧那个绿色圆角矩形按钮，上面写着白色"vConsole"
+          $:
+            timeout: 60000
+      - aiWaitFor:
+          prompt: 出现了 vConsole 调试面板：顶部有"Log""System"标签，下面一行有"All""Log""Info""Warn""Error"筛选项
+          options:
+            timeoutMs: 15000
+          $:
+            continue-on-error: true
+      - aiQuery:
+          prompt:
+            cloudSaveLogs: 面板 Log 列表里所有包含"云存档""CloudSave""DataManager""UOS"的日志，逐条原样抄写（保留数字和 saveId），一条都没有就填"无存档相关日志"
+            errorLogs: 面板 Log 列表里红色的错误日志和黄色警告里与资源、存档、登录、网络相关的条目，逐条原样抄写，没有就填"无"
+          $:
+            timeout: 120000
+      - aiAct:
+          prompt: 点击 vConsole 面板右下角的绿色"vConsole"悬浮按钮，把面板收起，回到游戏主界面
+          $:
+            timeout: 120000
+      - aiWaitFor:
+          prompt: vConsole 面板已经收起，能重新看到游戏底部的"店铺管理""街道""商店"按钮和顶部的金币钻石数值
+          options:
+            timeoutMs: 20000
+          $:
+            continue-on-error: true
+
+      # ---------- 第五段：判定 ----------
+      # 放在最后：一旦失败，前面的快照和 vConsole 日志都已进报告
+      - aiAssert:
+          prompt: 屏幕顶部的金币数值在十万以上（六位数，例如 47 万），钻石数值不少于 300，左上角粉丝数不少于 1000，说明冷启动读档成功、存档没有回退到资源归零的新手档
+          $:
+            timeout: 120000

@@ -2,11 +2,13 @@
 // 新增游戏后跑一次 `pnpm sync-games` 即可更新注册表。
 import edgeSpace from '../games/douyin/edge-space/game.config';
 import pop2048 from '../games/douyin/pop2048/game.config';
+import townfood from '../games/douyin/townfood/game.config';
 import type { GameConfig } from '../games/types';
 
 export const games: Readonly<Record<string, GameConfig>> = Object.freeze({
   [edgeSpace.key]: edgeSpace,
   [pop2048.key]: pop2048,
+  [townfood.key]: townfood,
 });
 
 export const gameKeys: readonly string[] = Object.keys(games);

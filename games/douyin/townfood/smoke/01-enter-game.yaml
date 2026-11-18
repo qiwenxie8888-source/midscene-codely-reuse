@@ -1,0 +1,12 @@
+# 冒烟 01：<占位，请改成一句话说明这条用例在验什么>
+# 一条用例一个文件：beforeAll 用 game.ensure（已在主菜单则跳过，省掉重复进游戏）
+beforeAll:
+  - game.ensure:
+      gameKey: douyin/townfood
+
+cases:
+  - name: 抖音搜索进入野兽朋友们的小巷食堂并加载主界面
+    steps:
+      - game.enter:
+          gameKey: douyin/townfood
+      - aiAssert: 屏幕上能看到"店铺管理"和"招揽顾客"的游戏界面文字，没有崩溃弹窗或黑屏
