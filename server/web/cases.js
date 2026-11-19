@@ -16,6 +16,8 @@ const state = {
   selectedGame: null,
   collapsed: {},
   activeGame: null, // null = 全部用例视图（只读，不能运行）
+  flake: new Map(), // 「游戏|文件名」→ 稳定性统计（来自 /api/cases/flake）
+  flakeWindow: 10,
   jobId: null,
   startedAt: null,
   timer: null,
@@ -47,10 +49,22 @@ async function api(path, options) {
 // ------------------------------------------------------------------ 数据
 
 async function load() {
-  // 用例列表用于渲染具体文件；游戏树用于渲染左侧先道/游戏（含还没有任何用例的空游戏）
-  const [cases, tree] = await Promise.all([api('/api/cases'), api('/api/game-tree')]);
+  // 用例列表用于渲染具体文件；游戏树用于渲染左侧渠道/游戏（含还没有任何用例的空游戏）；
+  // flake 统计用于行内稳定性列与顶部提示条——它挂了也不该让整个列表打不开
+  const [cases, tree, flake] = await Promise.all([
+    api('/api/cases'),
+    api('/api/game-tree'),
+    api(`/api/cases/flake?last=${state.flakeWindow}`).catch(() => ({ items: [] })),
+  ]);
   state.items = cases.items || [];
   state.tree = tree.channels || [];
+  state.flake = new Map();
+  for (const entry of flake.items || []) {
+    const key = flakeKey(entry.game_key, entry.source_path);
+    const existing = state.flake.get(key);
+    // 一个文件拆成多条 case 时保留 flake 最高的那条，别让稳定的 case 盖住抖动的
+    if (!existing || entry.flake_rate > existing.flake_rate) state.flake.set(key, entry);
+  }
   const alive = new Set(state.items.map((item) => item.path));
   for (const path of [...state.selected]) {
     if (!alive.has(path)) state.selected.delete(path);
@@ -63,6 +77,12 @@ async function load() {
   if (!state.activeGame && requested && keys.has(requested)) state.activeGame = requested;
   if (!state.activeGame && games.length) state.activeGame = games[0].game_key;
   render();
+}
+
+/** flake 统计按「游戏 + 文件名」索引：后端把单文件运行的历史路径归一成了裸文件名。 */
+function flakeKey(gameKey, path) {
+  const name = (path || '').split(/[\\/]/).pop() || '';
+  return `${gameKey || ''}|${name}`;
 }
 
 /** 拍平游戏树，并把该游戏的用例文件挂上去（空游戏 items 为空数组）。 */
@@ -105,12 +125,110 @@ function render() {
     return;
   }
 
+  const notice = flakeNotice(games);
+  if (notice) host.appendChild(notice);
+
   for (const game of currentScope()) {
     for (const suite of ['smoke', 'explore']) {
       const items = game.items.filter((item) => item.suite === suite);
       host.appendChild(suiteBlock(game, suite, items));
     }
   }
+}
+
+/**
+ * 页顶「最不稳」提示条：按 flake 率取前 5 条，再把 flake 为 0 的剔掉。
+ * 剔除后不足 5 条就显示几条（不补位）；一条不剩时整块不渲染。
+ */
+function flakeNotice(games) {
+  const entries = [...state.flake.values()]
+    .sort((a, b) => b.flake_rate - a.flake_rate || b.runs - a.runs)
+    .slice(0, 5)
+    .filter((entry) => entry.flake_rate > 0);
+  if (!entries.length) return null;
+
+  const gameNames = new Map(games.map((game) => [game.game_key, game.game_name || game.game_key]));
+
+  const box = document.createElement('div');
+  box.className = 'flake-notice';
+  const label = document.createElement('span');
+  label.className = 'label';
+  label.textContent = `最近 ${state.flakeWindow} 次最不稳`;
+  box.appendChild(label);
+
+  const chips = document.createElement('span');
+  chips.className = 'chips';
+  for (const entry of entries) {
+    const key = flakeKey(entry.game_key, entry.source_path);
+    const gameName = gameNames.get(entry.game_key) || entry.game_key || '未知游戏';
+    const fileName = (entry.source_path || '').replace(/\.ya?ml$/i, '');
+    const chip = document.createElement('button');
+    chip.type = 'button';
+    chip.className = 'chip';
+    const rate = Math.round(entry.flake_rate * 100);
+    chip.dataset.path = key;
+    chip.title = `${gameName} / ${entry.source_path}\n通过率 ${Math.round(
+      entry.pass_rate * 100,
+    )}%（${entry.passed}/${entry.runs}）· flake ${rate}%（${entry.flip_count}/${
+      Math.max(entry.runs - 1, 1)
+    }）`;
+    chip.innerHTML = `<span class="game-tag"></span><span class="file"></span><b>flake ${rate}%</b>`;
+    const tag = chip.querySelector('.game-tag');
+    tag.textContent = gameName;
+    tag.title = gameName;
+    chip.querySelector('.file').textContent = fileName;
+    chip.addEventListener('click', () => revealCase(key));
+    chips.appendChild(chip);
+  }
+  box.appendChild(chips);
+  return box;
+}
+
+/** 跳到某条用例：先切到它所属游戏，再滚动定位并高亮。不碰勾选状态。 */
+function revealCase(flakeId) {
+  const target = state.items.find((item) => flakeKey(item.game_key, item.path) === flakeId);
+  if (!target) {
+    // 静默失败最坑：用户以为点了没反应，其实是数据对不上
+    showNoticeHint('找不到该用例，可能刚被删除');
+    return;
+  }
+  const suiteKey = `${target.game_key}/${target.suite}`;
+  // explore 默认折叠；不展开就扫不到行，所以折叠状态变化也要重渲染
+  const collapsed = state.collapsed[suiteKey] ?? (target.suite === 'explore');
+  if (collapsed) state.collapsed[suiteKey] = false;
+  const gameChanged = state.activeGame !== target.game_key;
+  if (gameChanged) state.activeGame = target.game_key;
+  if (gameChanged || collapsed) render();
+  const row = [...document.querySelectorAll('#suites .case-row')].find(
+    (node) => node.dataset.path === target.path,
+  );
+  if (!row) {
+    showNoticeHint('找不到该用例，可能刚被删除');
+    return;
+  }
+  row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  // 行本来就在视口里时滚动没有任何变化，靠高亮告诉用户"就是这一条"。
+  // 先移除再加，连续点同一个 chip 也能重放动画。
+  row.classList.remove('flash');
+  void row.offsetWidth;
+  row.classList.add('flash');
+  clearTimeout(row._flashTimer);
+  row._flashTimer = setTimeout(() => row.classList.remove('flash'), 2000);
+}
+
+/** 提示条上的临时说明（比如定位失败），几秒后自己消失。 */
+function showNoticeHint(text) {
+  const box = document.querySelector('.flake-notice');
+  if (!box) return;
+  let hint = box.querySelector('.notice-error');
+  if (!hint) {
+    hint = document.createElement('span');
+    hint.className = 'notice-error';
+    box.appendChild(hint);
+  }
+  hint.textContent = text;
+  clearTimeout(hint._timer);
+  hint._timer = setTimeout(() => hint.remove(), 3000);
 }
 
 function renderSidebar(games) {
@@ -216,6 +334,7 @@ function suiteBlock(game, suite, items) {
 function caseRow(item, game) {
   const row = document.createElement('div');
   row.className = 'case-row' + (item.parse_error ? ' broken' : '');
+  row.dataset.path = item.path; // 供「最不稳」提示条滚动定位
 
   const checkbox = document.createElement('input');
   checkbox.type = 'checkbox';
@@ -274,8 +393,39 @@ function caseRow(item, game) {
   row.appendChild(checkbox);
   row.appendChild(file);
   row.appendChild(name);
+  row.appendChild(flakeCell(item));
   row.appendChild(actions);
   return row;
+}
+
+/**
+ * 稳定性列：通过率带迷你进度条，flake 率带括号里的原始次数（翻转/相邻对）。
+ * 样本少于 2 次时两个指标都不可信，显示「样本不足」而不是 0%。
+ */
+function flakeCell(item) {
+  const cell = document.createElement('div');
+  cell.className = 'flake-cell';
+  const stats = state.flake.get(flakeKey(item.game_key, item.path));
+
+  if (!stats || stats.runs < 2) {
+    cell.innerHTML = `
+      <span class="rate none">样本不足</span>
+      <span class="note">${stats ? `仅 ${stats.runs} 次运行` : '还没运行过'}</span>
+    `;
+    return cell;
+  }
+
+  const passRate = Math.round(stats.pass_rate * 100);
+  const flakeRate = Math.round(stats.flake_rate * 100);
+  const pairs = Math.max(stats.runs - 1, 1);
+  const level = passRate >= 90 ? 'good' : passRate >= 60 ? 'mid' : 'bad';
+  cell.innerHTML = `
+    <span class="rate ${level}" title="通过率：${stats.passed}/${stats.runs} 次通过">${passRate}%</span>
+    <div class="flake-bar"><i class="${level}" style="width:${passRate}%"></i></div>
+    <span class="note${flakeRate > 0 ? ' flaky' : ''}"
+      title="flake 率：${stats.flip_count} 次翻转 / ${pairs} 个相邻对">flake ${flakeRate}% (${stats.flip_count}/${pairs})</span>
+  `;
+  return cell;
 }
 
 // ------------------------------------------------------------------ 运行

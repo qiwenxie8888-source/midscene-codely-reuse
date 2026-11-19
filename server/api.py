@@ -402,11 +402,10 @@ def case_flake(
     import os
     from pathlib import Path
 
+    import yaml
+
     where = ["status IN ('success', 'failed')"]
     params: dict[str, Any] = {}
-    if game:
-        where.append("game_key = :game")
-        params["game"] = game
     if since:
         where.append("run_id >= :since")
         params["since"] = since
@@ -423,16 +422,58 @@ def case_flake(
     finally:
         conn.close()
 
+    games_root = Path(__file__).resolve().parent.parent / "games"
+    # 早期单文件直跑的历史行只存了文件名、game_key 为空，需要认领回所属游戏。
+    # 判据优先用「文件名 + 用例名」：同名文件（01-enter-game.yaml）可能属于多个游戏，
+    # 但用例名各不相同。先从正常的行建映射，再回填；都对不上才保留空值。
+    claimed: dict[tuple[str, str], set[str]] = {}
+    for row in rows:
+        if row.get("game_key"):
+            key = (os.path.basename(row["source_path"]), row.get("name") or "")
+            claimed.setdefault(key, set()).add(row["game_key"])
+
+    file_games: dict[str, set[str]] = {}
+    # 「文件名 + 用例名」→ 游戏：直接读磁盘上的 YAML，这样即使某个游戏从没有过
+    # 带 game_key 的历史行，也能把早期的空键记录认领回来
+    file_names: dict[tuple[str, str], set[str]] = {}
+    for path in games_root.rglob("*.y*ml"):
+        rel = path.relative_to(games_root)
+        if len(rel.parts) < 3:
+            continue
+        owner = f"{rel.parts[0]}/{rel.parts[1]}"
+        file_games.setdefault(path.name, set()).add(owner)
+        try:
+            document = yaml.safe_load(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, yaml.YAMLError):
+            continue
+        for case in (document or {}).get("cases") or []:
+            if isinstance(case, dict) and case.get("name"):
+                file_names.setdefault((path.name, str(case["name"])), set()).add(owner)
+
     grouped: dict[tuple[str, str, int], list[dict]] = {}
     for row in rows:
+        source_name = os.path.basename(row["source_path"])
+        game_key = row.get("game_key") or ""
+        if not game_key:
+            name = row.get("name") or ""
+            owners = claimed.get((source_name, name), set()) or file_names.get(
+                (source_name, name), set()
+            )
+            if len(owners) != 1:
+                # 用例名对不上时退一步：该文件名只属于一个游戏也能认
+                owners = file_games.get(source_name, set())
+            if len(owners) == 1:
+                game_key = next(iter(owners))
+        # game 过滤放在归一化之后：否则空 game_key 的历史行会被 SQL 提前排除，
+        # 结果仍然只按后半段样本统计
+        if game and game_key != game:
+            continue
         # 单文件运行的历史行 source_path 只剩文件名，按 (游戏, 文件名, 序号) 归并，
         # 否则同一条用例会被拆成两组
-        key = (row.get("game_key") or "", os.path.basename(row["source_path"]), row["case_index"])
-        grouped.setdefault(key, []).append(row)
+        grouped.setdefault((game_key, source_name, row["case_index"]), []).append(row)
 
-    games_root = Path(__file__).resolve().parent.parent / "games"
     items = []
-    for (_game, source_path, case_index), history in grouped.items():
+    for (game_key, source_path, case_index), history in grouped.items():
         window = history[-last:]
         statuses = [entry["status"] for entry in window]
         flips = sum(1 for a, b in zip(statuses, statuses[1:]) if a != b)
@@ -451,7 +492,7 @@ def case_flake(
                 "source_path": source_path,
                 "case_index": case_index,
                 "name": window[-1].get("name"),
-                "game_key": window[-1].get("game_key"),
+                "game_key": game_key,
                 "runs": len(statuses),
                 "passed": passed,
                 "pass_rate": round(passed / len(statuses), 3) if statuses else 0.0,
