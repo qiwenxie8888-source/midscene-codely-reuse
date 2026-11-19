@@ -407,3 +407,7 @@ a:hover { text-decoration: underline; }
   .ev-grid { grid-template-columns: 1fr; }
   .ev-card { margin-left: 0; }
 }
+
+.attr-bar { display: flex; align-items: center; gap: 10px; margin: 0 0 10px; flex-wrap: wrap; }
+.attr-hint { color: var(--faint); font-size: 12px; }
+.attr-error { color: var(--bad); font-size: 12px; }

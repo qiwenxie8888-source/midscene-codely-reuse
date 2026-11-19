@@ -87,7 +87,7 @@ def ensure_table(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE case_ai_causes ADD COLUMN {name} {ddl}")
 
 
-def load_rows(conn: sqlite3.Connection, only_unknown: bool) -> list[dict]:
+def load_rows(conn: sqlite3.Connection, only_unknown: bool, run_id: str | None = None) -> list[dict]:
     """挑出候选失败行。
 
     默认口径＝**每条失败都给建议**：status=failed，或生命周期失败（用例没跑，
@@ -106,10 +106,14 @@ def load_rows(conn: sqlite3.Connection, only_unknown: bool) -> list[dict]:
         WHERE c.error_detail IS NOT NULL
           AND (c.status = 'failed' OR (c.error_code IS NOT NULL AND c.failed_phase IS NOT NULL))
     """
+    params: dict[str, str] = {}
+    if run_id:
+        sql += " AND c.run_id = :run_id"
+        params["run_id"] = run_id
     if only_unknown:
         sql += " AND (c.cause_category IS NULL OR c.cause_category = 'unknown')"
     sql += " ORDER BY c.run_id DESC, c.source_path"
-    return [dict(row) for row in conn.execute(sql).fetchall()]
+    return [dict(row) for row in conn.execute(sql, params).fetchall()]
 
 
 def resolve_case_file(source_path: str, case_name: str | None = None) -> Path | None:
@@ -251,6 +255,7 @@ def main() -> int:
     parser.add_argument("--replay", action="store_true", help="只读历史数据，不接设备（当前唯一模式）")
     parser.add_argument("--no-image", action="store_true", help="不带截图（图会让单条耗时涨到 80–300s 且偶发超时）")
     parser.add_argument("--only-unknown", action="store_true", help="省钱档：只判规则判不出的行")
+    parser.add_argument("--run", default=None, help="只判指定 run_id（看板按钮用）")
     parser.add_argument("--limit", type=int, default=5, help="本批最多判几条，默认 5")
     parser.add_argument("--force", action="store_true", help="已判过的也重判")
     parser.add_argument("--dry-run", action="store_true", help="只打印选中的行与 prompt，不调模型")
@@ -269,7 +274,7 @@ def main() -> int:
     ensure_table(conn)
     conn.commit()
 
-    rows = load_rows(conn, args.only_unknown)
+    rows = load_rows(conn, args.only_unknown, args.run)
     if not rows:
         print("没有可判的行（生命周期失败也算，需要 error_detail 已入库）")
         return 0

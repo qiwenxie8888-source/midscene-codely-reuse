@@ -320,6 +320,57 @@ const evidenceCard = (item) => {
   </div>`;
 };
 
+// 只在该运行有失败、且还有没判过的行时给按钮；判完变「重判」
+const attributeButton = (run, cases) => {
+  const failed = (cases || []).filter((item) => item.status === 'failed' || item.error_code);
+  if (!failed.length) return '';
+  return `<div class="attr-bar"><button type="button" class="btn attr-btn"
+    data-run="${esc(run.run_id)}">AI 判定</button>
+    <span class="attr-hint">可选：让模型看证据给个建议，约 1–3 分钟，不影响测试结果</span></div>`;
+};
+
+async function runAttribution(button) {
+  const runId = button.dataset.run;
+  const bar = button.closest('.attr-bar');
+  const card = button.closest('.run');
+  button.disabled = true;
+  button.textContent = '判定中…';
+  try {
+    const response = await fetch(`/api/runs/${encodeURIComponent(runId)}/attribute`, {
+      method: 'POST',
+    });
+    if (!response.ok) throw new Error((await response.text()).slice(0, 120));
+  } catch (error) {
+    button.disabled = false;
+    button.textContent = 'AI 判定';
+    if (bar) bar.insertAdjacentHTML('beforeend', `<span class="attr-error">${esc(error.message)}</span>`);
+    return;
+  }
+  const tick = async () => {
+    let state = 'running';
+    try {
+      const status = await getJson(`/api/runs/${encodeURIComponent(runId)}/attribute`);
+      state = status.state || 'running';
+    } catch {
+      state = 'running';
+    }
+    if (state === 'running') {
+      setTimeout(tick, 2000);
+      return;
+    }
+    button.textContent = state === 'error' ? '重试' : '重判 AI';
+    button.disabled = false;
+    if (state === 'done' && card) {
+      const detail = card.querySelector('.run-detail');
+      if (detail) {
+        detail.classList.add('hidden');
+        await toggleDetail(card);
+      }
+    }
+  };
+  setTimeout(tick, 2000);
+}
+
 async function toggleDetail(card) {
   const detail = card.querySelector('.run-detail');
   if (!detail) return;
@@ -340,6 +391,7 @@ async function toggleDetail(card) {
         <span>用例集 ${esc(run.suites || '—')}</span>
         <span>游戏 ${esc((run.games || '').split(',').filter(Boolean).map(gameLabel).join('、') || '—')}</span>
       </div>
+      ${attributeButton(run, cases)}
       ${
         cases.length
           ? `<div class="case-list">${cases
@@ -386,6 +438,12 @@ $('runs').addEventListener('click', (event) => {
   }
   if (event.target.closest('.cause-edit')) {
     event.stopPropagation();
+    return;
+  }
+  const attrBtn = event.target.closest('.attr-btn');
+  if (attrBtn) {
+    event.stopPropagation();
+    runAttribution(attrBtn);
     return;
   }
   const badge = event.target.closest('.cause-badge');

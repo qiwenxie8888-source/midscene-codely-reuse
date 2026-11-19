@@ -1,4 +1,4 @@
-"""运行看板 API：读库 + 触发/观测/取消测试运行。
+﻿"""运行看板 API：读库 + 触发/观测/取消测试运行。
 
 启动（在项目根目录执行）：
   .venv/Scripts/python -m uvicorn server.api:app --reload --port 8000
@@ -327,6 +327,143 @@ def set_case_cause(payload: CaseCauseRequest) -> dict[str, Any]:
     finally:
         conn.close()
     return dict(row)
+
+
+# ---------------------------------------------------------------- AI 初判（按按钮触发）
+# 只允许同时跑一个：模型调用很慢，并发只会互相拖慢，还容易把设备/会话搞乱
+_attribute_state: dict[str, dict[str, Any]] = {}
+_attribute_running = False
+
+
+@app.post("/api/runs/{run_id}/attribute")
+def start_attribution(run_id: str) -> dict[str, Any]:
+    """对某次运行的失败用例触发一次 AI 初判（异步，返回后前端轮询状态）。"""
+    import subprocess
+    import sys
+    import threading
+    from pathlib import Path
+
+    global _attribute_running
+    if _attribute_running:
+        raise HTTPException(status_code=409, detail="已有归因任务在跑，请稍后再试")
+
+    root = Path(__file__).resolve().parent.parent
+    _attribute_running = True
+    _attribute_state[run_id] = {"state": "running"}
+
+    def worker() -> None:
+        global _attribute_running
+        try:
+            proc = subprocess.run(
+                [
+                    sys.executable,
+                    str(root / "server" / "attribute.py"),
+                    "--replay",
+                    "--run",
+                    run_id,
+                    # 按钮语义＝「点了就判这一次」，不跳过任何行
+                    "--force",
+                ],
+                capture_output=True,
+                cwd=str(root),
+            )
+            tail = (proc.stdout or b"").decode("utf-8", "replace")[-600:]
+            _attribute_state[run_id] = {
+                "state": "done" if proc.returncode == 0 else "error",
+                "message": tail,
+            }
+        except Exception as exc:  # noqa: BLE001 - 失败原因要原样带给前端
+            _attribute_state[run_id] = {"state": "error", "message": str(exc)}
+        finally:
+            _attribute_running = False
+
+    threading.Thread(target=worker, daemon=True).start()
+    return _attribute_state[run_id]
+
+
+@app.get("/api/runs/{run_id}/attribute")
+def attribution_state(run_id: str) -> dict[str, Any]:
+    """查询归因状态：idle / running / done / error（只存内存，重启后回到 idle）。"""
+    return _attribute_state.get(run_id, {"state": "idle"})
+
+
+@app.get("/api/cases/flake")
+def case_flake(
+    game: str | None = None,
+    last: int = Query(10, ge=2, le=50),
+    since: str | None = None,
+) -> dict[str, Any]:
+    """按用例统计稳定性：最近 N 次的通过率、翻转次数与 flake 率。
+
+    口径：只统计 success/failed——not-run（生命周期失败）根本没执行，不代表用例不稳。
+    按用例文件内容 hash 分代：改了用例就从零累积，否则看不出改造前后的差别。
+    """
+    import hashlib
+    import os
+    from pathlib import Path
+
+    where = ["status IN ('success', 'failed')"]
+    params: dict[str, Any] = {}
+    if game:
+        where.append("game_key = :game")
+        params["game"] = game
+    if since:
+        where.append("run_id >= :since")
+        params["since"] = since
+
+    conn = connect()
+    try:
+        rows = to_list(
+            conn.execute(
+                f"SELECT source_path, case_index, game_key, run_id, status, name FROM cases "
+                f"WHERE {' AND '.join(where)} ORDER BY run_id ASC",
+                params,
+            )
+        )
+    finally:
+        conn.close()
+
+    grouped: dict[tuple[str, str, int], list[dict]] = {}
+    for row in rows:
+        # 单文件运行的历史行 source_path 只剩文件名，按 (游戏, 文件名, 序号) 归并，
+        # 否则同一条用例会被拆成两组
+        key = (row.get("game_key") or "", os.path.basename(row["source_path"]), row["case_index"])
+        grouped.setdefault(key, []).append(row)
+
+    games_root = Path(__file__).resolve().parent.parent / "games"
+    items = []
+    for (_game, source_path, case_index), history in grouped.items():
+        window = history[-last:]
+        statuses = [entry["status"] for entry in window]
+        flips = sum(1 for a, b in zip(statuses, statuses[1:]) if a != b)
+        passed = statuses.count("success")
+        # 找用例文件算分代 hash；同名文件有多个时退化为不分组
+        candidates = [games_root / source_path] if (games_root / source_path).exists() else []
+        candidates = candidates or list(games_root.glob(f"*/*/*/{source_path}"))
+        digest = ""
+        if len(candidates) == 1:
+            try:
+                digest = hashlib.sha256(candidates[0].read_bytes()).hexdigest()[:12]
+            except OSError:
+                digest = ""
+        items.append(
+            {
+                "source_path": source_path,
+                "case_index": case_index,
+                "name": window[-1].get("name"),
+                "game_key": window[-1].get("game_key"),
+                "runs": len(statuses),
+                "passed": passed,
+                "pass_rate": round(passed / len(statuses), 3) if statuses else 0.0,
+                "flip_count": flips,
+                "flake_rate": round(flips / (len(statuses) - 1), 3) if len(statuses) > 1 else 0.0,
+                "case_hash": digest,
+                "statuses": statuses,
+            }
+        )
+
+    items.sort(key=lambda item: (item["flake_rate"], item["runs"]), reverse=True)
+    return {"items": items, "window": last, "game": game, "since": since}
 
 
 @app.get("/api/games")

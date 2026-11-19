@@ -1,4 +1,4 @@
-// 一条命令跑完整流程：Midscene 测试 → 入库 → 清理散落产物
+﻿// 一条命令跑完整流程：Midscene 测试 → 入库 → 清理散落产物
 //
 // 之所以用 Node 脚本而不是 package.json 里用 && 串命令：
 //   1. 每步都要判断成败，测试失败时仍然要入库（失败数据更要分析）
@@ -25,6 +25,7 @@ const valueOf = (flag, fallback) => {
 const project = valueOf('--project', 'smoke');
 const skipTest = has('--skip-test');
 const noClean = has('--no-clean');
+const attribute = has('--attribute');
 const jsonMode = has('--json');
 // 只跑某个游戏（渠道/游戏目录）。会给 midscene-test 加 --only games/<game>，
 // 从而"只跑这个游戏"与"一个进程跑完复用会话"两者兼得。
@@ -263,6 +264,19 @@ async function main() {
 
   // 测试失败也继续入库：失败运行恰恰是最需要被记录和分析的
   const ingestOk = await step('3/4 入库', python, [resolve(projectRoot, 'server/ingest.py')]);
+
+  // 跑完就把本次失败的 AI 初判补上（显式 --no-attribute 才跳过）
+  let attributeOk = true;
+  if (attribute) {
+    attributeOk = await step('3.5/4 AI 初判', python, [
+      resolve(projectRoot, 'server/attribute.py'),
+      '--replay',
+      '--limit',
+      '10',
+    ]);
+  } else {
+    log('跳过 AI 初判（未传 --attribute）');
+  }
 
   let cleanOk = true;
   if (!noClean) {
