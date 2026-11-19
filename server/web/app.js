@@ -299,7 +299,7 @@ const evidenceCard = (item) => {
               }</span>
                <p>${esc(item.ai_reason || '')}</p>
                ${item.ai_evidence ? `<blockquote>证据原文：${esc(item.ai_evidence)}</blockquote>` : ''}`
-            : `<p class="ev-muted">${esc(item.ai_error || '还没跑 AI 初判（python server/attribute.py --replay）')}</p>`
+            : `<p class="ev-muted">${esc(item.ai_error || '还没跑 AI 判定（点击上方按钮，或 python server/attribute.py --replay）')}</p>`
         }
         ${aiLabel && item.ai_error ? `<p class="ev-muted">本轮丢弃原因：${esc(item.ai_error)}</p>` : ''}
       </div>
@@ -320,7 +320,7 @@ const evidenceCard = (item) => {
   </div>`;
 };
 
-// 只在该运行有失败、且还有没判过的行时给按钮；判完变「重判」
+// 只在该运行有失败时给按钮：点一次就对本次运行的全部失败行重判，不点就不跑
 const attributeButton = (run, cases) => {
   const failed = (cases || []).filter((item) => item.status === 'failed' || item.error_code);
   if (!failed.length) return '';
@@ -358,8 +358,12 @@ async function runAttribution(button) {
       setTimeout(tick, 2000);
       return;
     }
-    button.textContent = state === 'error' ? '重试' : '重判 AI';
+    button.textContent = 'AI 判定';
     button.disabled = false;
+    // 按钮不再用文案区分成败，失败反馈单独占一行提示
+    if (state === 'error' && bar && !bar.querySelector('.attr-error')) {
+      bar.insertAdjacentHTML('beforeend', '<span class="attr-error">判定失败，可再点一次</span>');
+    }
     if (state === 'done' && card) {
       const detail = card.querySelector('.run-detail');
       if (detail) {

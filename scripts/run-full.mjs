@@ -265,17 +265,17 @@ async function main() {
   // 测试失败也继续入库：失败运行恰恰是最需要被记录和分析的
   const ingestOk = await step('3/4 入库', python, [resolve(projectRoot, 'server/ingest.py')]);
 
-  // 跑完就把本次失败的 AI 初判补上（显式 --no-attribute 才跳过）
+  // AI 判定默认不跑（会调模型、耗时且花额度），只有显式传 --attribute 才执行
   let attributeOk = true;
   if (attribute) {
-    attributeOk = await step('3.5/4 AI 初判', python, [
+    attributeOk = await step('3.5/4 AI 判定', python, [
       resolve(projectRoot, 'server/attribute.py'),
       '--replay',
       '--limit',
       '10',
     ]);
   } else {
-    log('跳过 AI 初判（未传 --attribute）');
+    log('跳过 AI 判定（未传 --attribute）');
   }
 
   let cleanOk = true;
