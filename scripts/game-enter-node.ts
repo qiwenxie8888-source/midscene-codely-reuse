@@ -194,15 +194,43 @@ async function runEnterChain(
     // 没有弹窗时 aiTap 找不到目标会抛错，忽略即可
   }
 
-  // 5) 等待游戏主菜单出现（视觉关卡）；漏网的弹窗给一次自愈机会
+  // 5) 等待游戏主菜单出现（视觉关卡）；失败时先判断是不是点错进了列表页，再处理遮挡弹窗
   try {
     await agent.aiWaitFor(game.enter.menuPrompt, {
       timeoutMs: Math.min(waitTimeoutMs, 45000),
     });
   } catch {
-    await agent.aiAct(
-      '如果屏幕上有弹窗遮挡，点击"拒绝""关闭"或"允许"把它关掉；没有弹窗就不要操作'
-    );
+    // 兜底 A：搜索结果里的聚合区块会把我们带进「小游戏」列表页，
+    // 这时该页第一行往往就是目标游戏，直接点它右侧的"玩一玩"还能救回来
+    let rescued = false;
+    try {
+      rescued = await agent.aiBoolean(
+        '当前屏幕标题是否是"小游戏"，下方是一列游戏卡片、每行右侧有红色"玩一玩"按钮'
+      );
+      if (rescued) {
+        console.log(`[game.enter] 检测到「小游戏」列表页，尝试点「${game.name}」那一行的玩一玩救援`);
+        await agent.aiTap(
+          `标题为"小游戏"的列表中，名为"${game.name}"的那一行右侧红色的"玩一玩"按钮`
+        );
+        console.log('[game.enter] 救援点击已执行');
+        // 重新拉起小游戏时可能再弹订阅提醒，失败就忽略
+        try {
+          await agent.aiTap(
+            '抖音的订阅提醒弹窗（含"当「可继续游戏」时，是否在首页视频流提醒你"字样）中的"拒绝"按钮'
+          );
+        } catch {
+          // 没有弹窗
+        }
+      }
+    } catch {
+      rescued = false;
+    }
+    // 兜底 B：普通弹窗遮挡
+    if (!rescued) {
+      await agent.aiAct(
+        '如果屏幕上有弹窗遮挡，点击"拒绝""关闭"或"允许"把它关掉；没有弹窗就不要操作'
+      );
+    }
     await agent.aiWaitFor(game.enter.menuPrompt, {
       timeoutMs: 60000,
     });
