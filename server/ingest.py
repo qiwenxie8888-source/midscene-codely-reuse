@@ -22,7 +22,9 @@ r"""把 Midscene Test 的运行产物登记进 SQLite（ingest）。
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import os
 import re
 import shutil
 import sqlite3
@@ -30,6 +32,8 @@ import sys
 from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
+
+import yaml
 
 try:  # 包模式：uvicorn server.api:app 时由 api 导入本模块
     from .causes import CATEGORIES as CAUSE_CATEGORIES
@@ -104,6 +108,7 @@ CREATE TABLE IF NOT EXISTS cases (
   cause_source     TEXT,
   cause_reason     TEXT,
   cause_confidence REAL,
+  file_hash    TEXT,
   UNIQUE (run_id, source_path, case_index)
 );
 
@@ -135,6 +140,7 @@ CASE_COLUMNS = [
     ("error_detail", "TEXT"),
     ("evidence_shot", "TEXT"),
     ("evidence_dump", "TEXT"),
+    ("file_hash", "TEXT"),
 ]
 
 
@@ -165,6 +171,77 @@ def build_case_file_index() -> dict[str, set[tuple[str, str]]]:
 
 
 CASE_FILE_INDEX: dict[str, set[tuple[str, str]]] = build_case_file_index()
+
+
+@lru_cache(maxsize=256)
+def yaml_case_names(path_str: str) -> frozenset[str]:
+    """读用例文件里的 cases[].name，用于在多个同名文件间认出正确的那份。"""
+    try:
+        document = yaml.safe_load(Path(path_str).read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 - 坏文件不影响统计
+        return frozenset()
+    cases = (document or {}).get("cases") or []
+    return frozenset(
+        str(case["name"])
+        for case in cases
+        if isinstance(case, dict) and case.get("name")
+    )
+
+
+def case_file_hash(
+    source_path: str,
+    game_key: str | None,
+    suite: str | None,
+    case_name: str | None = None,
+) -> str | None:
+    """按用例文件内容算指纹，用于 flake 分代。
+
+    只认独一无二的文件：完整路径直接读；裸文件名优先用 game_key + suite 拼。
+    同名文件分属多个游戏时，再用用例名区分（单文件运行拿不到 game_key，
+    一个文件名可能对应多个游戏，这时候用例名是唯一能对上的线索）。
+    """
+    candidate: Path | None = None
+    if "/" in source_path or "\\" in source_path:
+        direct = PROJECT_ROOT / source_path
+        if direct.exists():
+            candidate = direct
+    if candidate is None and game_key and suite:
+        named = PROJECT_ROOT / "games" / game_key / suite / os.path.basename(source_path)
+        if named.exists():
+            candidate = named
+    if candidate is None:
+        matches = list(
+            (PROJECT_ROOT / "games").glob(f"*/*/*/{os.path.basename(source_path)}")
+        )
+        if len(matches) == 1:
+            candidate = matches[0]
+        elif case_name:
+            matched = [
+                path
+                for path in matches
+                if case_name in yaml_case_names(str(path))
+            ]
+            if len(matched) == 1:
+                candidate = matched[0]
+                # 从路径补出 game_key，才能把该游戏的配置一起算进指纹
+                if not game_key:
+                    rel = candidate.relative_to(PROJECT_ROOT / "games")
+                    if len(rel.parts) >= 3:
+                        game_key = f"{rel.parts[0]}/{rel.parts[1]}"
+    if candidate is None:
+        return None
+    try:
+        content = candidate.read_bytes()
+    except OSError:
+        return None
+    # 游戏的进入链配置（cardPrompt / menuPrompt）同样决定用例行为，一起算进指纹：
+    # 只改用例 YAML 会切代，改配置也要切，否则改造后的数据会和旧数据混算
+    if game_key:
+        try:
+            content += (PROJECT_ROOT / "games" / game_key / "game.config.ts").read_bytes()
+        except OSError:
+            pass
+    return hashlib.sha256(content).hexdigest()[:12]
 
 
 def classify(
@@ -610,13 +687,19 @@ INSERT OR IGNORE INTO cases (
   run_id, project, suite, game_key, source_path, case_index, name, status, attempts,
   duration_ms, failed_node, failed_phase, error_code, error_message,
   error_detail, evidence_shot, evidence_dump,
-  cause_category, cause_source, cause_reason, cause_confidence
+  cause_category, cause_source, cause_reason, cause_confidence, file_hash
 ) VALUES (
   :run_id, :project, :suite, :game_key, :source_path, :case_index, :name, :status, :attempts,
   :duration_ms, :failed_node, :failed_phase, :error_code, :error_message,
   :error_detail, :evidence_shot, :evidence_dump,
-  :cause_category, :cause_source, :cause_reason, :cause_confidence
+  :cause_category, :cause_source, :cause_reason, :cause_confidence, :file_hash
 )
+"""
+
+# 重跑 ingest 不能按当前文件重算历史行的指纹：否则改完用例再跑一次 ingest，
+# 旧运行会被伪装成新版本的成绩，分代就失效了。有旧值就沿用，包括空值。
+FILE_HASH_SELECT = """
+SELECT source_path, case_index, file_hash FROM cases WHERE run_id = ?
 """
 
 # 人工改判的结论要在重跑 ingest 时保住：先快照，重写完再贴回去
@@ -718,9 +801,26 @@ def ingest(result_dir: Path, db_path: Path, dry_run: bool) -> int:
         assert conn is not None
         # 先记住人工改判过的行，重写完再贴回去（规则结论允许被重算）
         saved = load_manual_causes(conn, run["run_id"])
+        # 指纹同理：这张表以前入过库的话，沿用当时的指纹，不按当前文件重算
+        saved_hashes = {
+            (row[0], row[1]): row[2]
+            for row in conn.execute(FILE_HASH_SELECT, (run["run_id"],)).fetchall()
+            if row[0] is not None and row[1] is not None
+        }
         conn.execute("DELETE FROM cases WHERE run_id = ?", (run["run_id"],))
         conn.execute(RUN_INSERT, run)
-        conn.executemany(CASE_INSERT, [{**case, "run_id": run["run_id"]} for case in cases])
+        rows = []
+        for case in cases:
+            key = (case["source_path"], case["case_index"])
+            file_hash = (
+                saved_hashes[key]
+                if key in saved_hashes
+                else case_file_hash(
+                    case["source_path"], case["game_key"], case["suite"], case.get("name")
+                )
+            )
+            rows.append({**case, "run_id": run["run_id"], "file_hash": file_hash})
+        conn.executemany(CASE_INSERT, rows)
         restored = restore_manual_causes(conn, run["run_id"], saved)
         if restored:
             print(f"    保留人工定性：{restored} 条")

@@ -406,11 +406,17 @@ function flakeCell(item) {
   const cell = document.createElement('div');
   cell.className = 'flake-cell';
   const stats = state.flake.get(flakeKey(item.game_key, item.path));
+  // 数据所属代与当前文件指纹不一致 = 用例改过但还没重跑，这时的数字是旧版本的
+  const stale = Boolean(
+    stats && stats.generation_hash && stats.case_hash && stats.generation_hash !== stats.case_hash,
+  );
 
   if (!stats || stats.runs < 2) {
     cell.innerHTML = `
       <span class="rate none">样本不足</span>
-      <span class="note">${stats ? `仅 ${stats.runs} 次运行` : '还没运行过'}</span>
+      <span class="note${stale ? ' stale' : ''}">${
+        stale ? '用例已修改，待重跑' : stats ? `仅 ${stats.runs} 次运行` : '还没运行过'
+      }</span>
     `;
     return cell;
   }
@@ -424,6 +430,7 @@ function flakeCell(item) {
     <div class="flake-bar"><i class="${level}" style="width:${passRate}%"></i></div>
     <span class="note${flakeRate > 0 ? ' flaky' : ''}"
       title="flake 率：${stats.flip_count} 次翻转 / ${pairs} 个相邻对">flake ${flakeRate}% (${stats.flip_count}/${pairs})</span>
+    ${stale ? '<span class="note stale">用例已修改，待重跑</span>' : ''}
   `;
   return cell;
 }

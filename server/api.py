@@ -398,11 +398,12 @@ def case_flake(
     口径：只统计 success/failed——not-run（生命周期失败）根本没执行，不代表用例不稳。
     按用例文件内容 hash 分代：改了用例就从零累积，否则看不出改造前后的差别。
     """
-    import hashlib
     import os
     from pathlib import Path
 
     import yaml
+
+    from .ingest import case_file_hash
 
     where = ["status IN ('success', 'failed')"]
     params: dict[str, Any] = {}
@@ -414,7 +415,7 @@ def case_flake(
     try:
         rows = to_list(
             conn.execute(
-                f"SELECT source_path, case_index, game_key, run_id, status, name FROM cases "
+                f"SELECT source_path, case_index, game_key, run_id, status, name, suite, file_hash FROM cases "
                 f"WHERE {' AND '.join(where)} ORDER BY run_id ASC",
                 params,
             )
@@ -450,7 +451,7 @@ def case_flake(
             if isinstance(case, dict) and case.get("name"):
                 file_names.setdefault((path.name, str(case["name"])), set()).add(owner)
 
-    grouped: dict[tuple[str, str, int], list[dict]] = {}
+    grouped: dict[tuple[str, str, int, str], list[dict]] = {}
     for row in rows:
         source_name = os.path.basename(row["source_path"])
         game_key = row.get("game_key") or ""
@@ -469,24 +470,28 @@ def case_flake(
         if game and game_key != game:
             continue
         # 单文件运行的历史行 source_path 只剩文件名，按 (游戏, 文件名, 序号) 归并，
-        # 否则同一条用例会被拆成两组
-        grouped.setdefault((game_key, source_name, row["case_index"]), []).append(row)
+        # 否则同一条用例会被拆成两组；再加上用例文件指纹，避免改了用例后新旧混算
+        grouped.setdefault(
+            (game_key, source_name, row["case_index"], row.get("file_hash") or ""), []
+        ).append(row)
+
+    # 先把同一用例的各代收在一起：flake 只算最新一代，旧代直接不参与
+    by_case: dict[tuple[str, str, int], list[list[dict]]] = {}
+    for (game_key, source_path, case_index, _digest), history in grouped.items():
+        by_case.setdefault((game_key, source_path, case_index), []).append(history)
 
     items = []
-    for (game_key, source_path, case_index), history in grouped.items():
+    for (game_key, source_path, case_index), generations in by_case.items():
+        # run_id 前 14 位是时间戳，字典序即时间序；取最近跑过的那一代
+        history = max(generations, key=lambda gen: gen[-1]["run_id"])
+        generation_hash = history[-1].get("file_hash") or ""
         window = history[-last:]
         statuses = [entry["status"] for entry in window]
         flips = sum(1 for a, b in zip(statuses, statuses[1:]) if a != b)
         passed = statuses.count("success")
-        # 找用例文件算分代 hash；同名文件有多个时退化为不分组
-        candidates = [games_root / source_path] if (games_root / source_path).exists() else []
-        candidates = candidates or list(games_root.glob(f"*/*/*/{source_path}"))
-        digest = ""
-        if len(candidates) == 1:
-            try:
-                digest = hashlib.sha256(candidates[0].read_bytes()).hexdigest()[:12]
-            except OSError:
-                digest = ""
+        digest = case_file_hash(
+            source_path, game_key or None, window[-1].get("suite"), window[-1].get("name")
+        )
         items.append(
             {
                 "source_path": source_path,
@@ -499,6 +504,7 @@ def case_flake(
                 "flip_count": flips,
                 "flake_rate": round(flips / (len(statuses) - 1), 3) if len(statuses) > 1 else 0.0,
                 "case_hash": digest,
+                "generation_hash": generation_hash,
                 "statuses": statuses,
             }
         )
