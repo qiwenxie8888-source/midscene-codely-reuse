@@ -1,4 +1,4 @@
-<!doctype html>
+﻿<!doctype html>
 <html lang="zh-CN">
   <head>
     <meta charset="utf-8" />
@@ -7,49 +7,51 @@
     <link rel="stylesheet" href="/static/style.css" />
     <style>
       .layout { display: flex; gap: 16px; align-items: flex-start; }
-      .sidebar { width: 230px; flex: 0 0 230px; background: #fff; border-radius: 12px; padding: 10px; position: sticky; top: 16px; }
-      .side-item { display: flex; align-items: center; gap: 8px; padding: 7px 10px 7px 28px; border-radius: 8px; cursor: pointer; font-size: 13px; color: #3a4a5c; }
+      .sidebar { width: 264px; flex: 0 0 264px; background: #fff; border-radius: 12px; padding: 10px; position: sticky; top: 16px; }
+      .side-item { display: flex; align-items: center; gap: 8px; padding: 7px 10px 7px 28px; border-radius: 8px; cursor: pointer; font-size: 14px; color: #3a4a5c; }
+      /* 游戏名过长时省略，不要折成两行把行高撑歪 */
+      .side-item .game-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
       .side-item:hover { background: #f2f5f9; }
       .side-item.active { background: #eef4ff; color: #2f6fd0; font-weight: 600; }
       .side-item .right-slot { margin-left: auto; display: flex; align-items: center; justify-content: flex-end; min-width: 52px; }
-      .side-item .count { font-size: 12px; color: #9aa4b2; }
+      .side-item .count { font-size: 13px; color: #9aa4b2; }
       /* 游戏项的操作图标：默认隐藏，hover 才出现，避免干扰阅读；与数量同槽位，保证贴行尾且不跳位 */
       .side-item .game-actions { display: none; gap: 2px; }
       .side-item:hover .game-actions { display: flex; }
       .side-item:hover .right-slot .count { display: none; }
-      .side-icon { border: none; background: transparent; color: #8b95a5; cursor: pointer; font-size: 12px; line-height: 1; padding: 3px 4px; border-radius: 5px; }
+      .side-icon { border: none; background: transparent; color: #8b95a5; cursor: pointer; font-size: 13px; line-height: 1; padding: 3px 4px; border-radius: 5px; }
       .side-icon:hover { background: #e7ecf4; color: #2f6fd0; }
       .side-icon.danger:hover { background: #fdecea; color: #c0392b; }
       /* 渠道是分组标题，游戏缩进在它下面，字号统一为 13px，避免看起来并列 */
-      .side-channel { display: flex; align-items: center; gap: 6px; padding: 12px 10px 4px; font-size: 13px; color: #6b7788; cursor: pointer; user-select: none; border-radius: 8px; }
+      .side-channel { display: flex; align-items: center; gap: 6px; padding: 12px 10px 4px; font-size: 14px; color: #6b7788; cursor: pointer; user-select: none; border-radius: 8px; }
       .side-channel:hover { background: #f7f9fc; }
       .side-channel .caret { width: 0; height: 0; border-left: 5px solid transparent; border-right: 5px solid transparent; border-top: 6px solid #9aa4b2; transition: transform 0.15s; transform-origin: center; }
       .side-channel .caret.collapsed { transform: rotate(-90deg); }
       .side-channel .channel-name { flex: 1; font-weight: 600; }
-      .side-channel .count { font-size: 12px; color: #9aa4b2; }
+      .side-channel .count { font-size: 13px; color: #9aa4b2; }
       .side-add { border: 1px solid #dde3ec; background: #fff; color: #45526b; border-radius: 6px; width: 20px; height: 20px; line-height: 1; font-size: 14px; cursor: pointer; padding: 0; }
       .side-add:hover { background: #eef4ff; border-color: #b9cffb; color: #2f6fd0; }
       .main { flex: 1; min-width: 0; }
-      .notice { background: #fff8e6; border: 1px solid #ffe2a8; color: #8a6100; border-radius: 10px; padding: 10px 14px; font-size: 13px; margin-bottom: 16px; }
+      .notice { background: #fff8e6; border: 1px solid #ffe2a8; color: #8a6100; border-radius: 10px; padding: 10px 14px; font-size: 14px; margin-bottom: 16px; }
       .suite-block { background: #fff; border-radius: 12px; margin-bottom: 16px; overflow: hidden; }
       .suite-head { display: flex; align-items: center; gap: 12px; padding: 14px 18px; border-bottom: 1px solid #eef1f5; }
-      .suite-head h3 { margin: 0; font-size: 15px; }
+      .suite-head h3 { margin: 0; font-size: 16px; }
       .suite-head .spacer { flex: 1; }
       .case-row { display: flex; align-items: center; gap: 12px; padding: 12px 18px; border-bottom: 1px solid #f4f6f9; }
       .case-row:last-child { border-bottom: none; }
       .case-row:hover { background: #fafbfd; }
       /* 用例名加到稳定性列后必须能收缩，否则长名字会把两个数字挤成两行 */
-      .case-row .file { font-family: ui-monospace, Consolas, monospace; font-size: 12.5px; color: #3a4a5c; flex: 0 0 186px; white-space: nowrap; }
-      .case-row .name { flex: 1; color: #1f2937; font-size: 14px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .case-row .file { font-family: ui-monospace, Consolas, monospace; font-size: 13.5px; color: #3a4a5c; flex: 0 0 186px; white-space: nowrap; }
+      .case-row .name { flex: 1; color: #1f2937; font-size: 15px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
       .case-row.broken { background: #fff7f7; }
       /* 稳定性列：通过率在上（带进度条），flake 率在下 */
       .flake-cell { flex: 0 0 118px; display: flex; flex-direction: column; align-items: flex-end; gap: 3px; }
-      .flake-cell .rate { font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; }
+      .flake-cell .rate { font-size: 14px; font-weight: 600; font-variant-numeric: tabular-nums; }
       .flake-cell .rate.good { color: #1a7f37; }
       .flake-cell .rate.mid { color: #a86500; }
       .flake-cell .rate.bad { color: #c0392b; }
       .flake-cell .rate.none { color: #9aa4b2; font-weight: 400; }
-      .flake-cell .note { font-size: 11px; color: #9aa4b2; font-variant-numeric: tabular-nums; }
+      .flake-cell .note { font-size: 12px; color: #9aa4b2; font-variant-numeric: tabular-nums; }
       .flake-cell .note.flaky { color: #c0392b; }
       .flake-cell .note.stale { color: #a86500; }
       .flake-bar { width: 100%; height: 3px; border-radius: 2px; background: #eef1f5; overflow: hidden; }
@@ -58,13 +60,13 @@
       .flake-bar > i.mid { background: #e8a33d; }
       .flake-bar > i.bad { background: #e05b4f; }
       /* 页顶「最不稳」提示条 */
-      .flake-notice { display: flex; align-items: center; gap: 10px; background: #fdf7f6; border: 1px solid #f3d6d2; border-radius: 10px; padding: 10px 14px; margin-bottom: 16px; font-size: 13px; color: #8a4a42; }
+      .flake-notice { display: flex; align-items: center; gap: 10px; background: #fdf7f6; border: 1px solid #f3d6d2; border-radius: 10px; padding: 10px 14px; margin-bottom: 16px; font-size: 14px; color: #8a4a42; }
       .flake-notice .label { font-weight: 600; white-space: nowrap; }
       .flake-notice .chips { display: flex; align-items: center; gap: 8px; flex: 1 1 auto; min-width: 0; flex-wrap: wrap; }
-      .flake-notice .chip { display: inline-flex; align-items: center; gap: 6px; background: #fff; border: 1px solid #f0cfca; border-radius: 999px; padding: 3px 10px; font-size: 12px; color: #7a3d36; cursor: pointer; font-variant-numeric: tabular-nums; }
+      .flake-notice .chip { display: inline-flex; align-items: center; gap: 6px; background: #fff; border: 1px solid #f0cfca; border-radius: 999px; padding: 3px 10px; font-size: 13px; color: #7a3d36; cursor: pointer; font-variant-numeric: tabular-nums; }
       .flake-notice .chip:hover { background: #fff1ef; border-color: #e3a9a1; }
       /* 游戏名小标签：同名用例文件会出现在多个游戏下，光看文件名分不清 */
-      .flake-notice .chip .game-tag { max-width: 96px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; background: #f3e7e5; color: #8a4a42; border-radius: 4px; padding: 1px 6px; font-size: 11px; }
+      .flake-notice .chip .game-tag { max-width: 96px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; background: #f3e7e5; color: #8a4a42; border-radius: 4px; padding: 1px 6px; font-size: 12px; }
       .flake-notice .chip .file { font-family: ui-monospace, Consolas, monospace; color: #7a3d36; }
       .flake-notice .chip b { color: #c0392b; font-weight: 600; }
       .flake-notice .notice-error { font-size: 12px; color: #c0392b; white-space: nowrap; }
@@ -74,15 +76,15 @@
         0% { background: #fff6d8; box-shadow: inset 3px 0 0 #e8a33d; }
         100% { background: transparent; box-shadow: inset 3px 0 0 transparent; }
       }
-      .tag-error { background: #fdecea; color: #c0392b; border-radius: 999px; padding: 2px 8px; font-size: 12px; }
-      .tag-seq { background: #eef4ff; color: #2f6fd0; border-radius: 999px; padding: 2px 8px; font-size: 12px; }
-      .btn-mini { border: 1px solid #d8dee7; background: #fff; border-radius: 8px; padding: 4px 10px; font-size: 12px; cursor: pointer; color: #45526b; }
+      .tag-error { background: #fdecea; color: #c0392b; border-radius: 999px; padding: 2px 8px; font-size: 13px; }
+      .tag-seq { background: #eef4ff; color: #2f6fd0; border-radius: 999px; padding: 2px 8px; font-size: 13px; }
+      .btn-mini { border: 1px solid #d8dee7; background: #fff; border-radius: 8px; padding: 4px 10px; font-size: 13px; cursor: pointer; color: #45526b; }
       .btn-mini:hover { background: #f2f5f9; }
       .btn-mini.danger { color: #c0392b; border-color: #f0c6c1; }
       .toolbar { display: flex; align-items: center; gap: 10px; padding: 12px 18px; background: #f7f9fc; }
       .toolbar .spacer { flex: 1; }
       .log-box { background: #fff; border-radius: 12px; padding: 16px 18px; margin-bottom: 16px; }
-      .log-line { font-family: ui-monospace, Consolas, monospace; font-size: 13px; line-height: 1.7; white-space: pre-wrap; word-break: break-all; }
+      .log-line { font-family: ui-monospace, Consolas, monospace; font-size: 14px; line-height: 1.7; white-space: pre-wrap; word-break: break-all; }
       .log-line .indent1 { padding-left: 18px; }
       .log-line .indent2 { padding-left: 36px; }
       .log-line .ok { color: #1a7f37; }
@@ -92,7 +94,7 @@
       .run-head { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }
       .run-head .spacer { flex: 1; }
       .result-box { background: #fff; border-radius: 12px; padding: 16px 18px; margin-bottom: 16px; }
-      .result-row { display: flex; align-items: center; gap: 12px; padding: 10px 0; border-bottom: 1px solid #f4f6f9; font-size: 14px; }
+      .result-row { display: flex; align-items: center; gap: 12px; padding: 10px 0; border-bottom: 1px solid #f4f6f9; font-size: 15px; }
       .result-row:last-child { border-bottom: none; }
       .modal-mask { position: fixed; inset: 0; background: rgba(20, 28, 40, 0.45); display: flex; align-items: center; justify-content: center; z-index: 50; }
       /* 关键：一旦给元素写了 display，浏览器对 hidden 属性的默认 display:none 会被作者样式盖掉，必须显式兜底 */
@@ -100,7 +102,7 @@
       .modal { background: #fff; border-radius: 14px; width: min(920px, 92vw); max-height: 88vh; display: flex; flex-direction: column; overflow: hidden; }
       .modal.narrow { width: min(520px, 92vw); }
       .modal-head { display: flex; align-items: center; gap: 12px; padding: 14px 18px; border-bottom: 1px solid #eef1f5; }
-      .modal-head h3 { margin: 0; font-size: 15px; font-family: ui-monospace, Consolas, monospace; }
+      .modal-head h3 { margin: 0; font-size: 16px; font-family: ui-monospace, Consolas, monospace; }
       .modal-head .spacer { flex: 1; }
       .modal-body { padding: 16px 18px; overflow: auto; }
       .modal-foot { display: flex; align-items: center; gap: 10px; padding: 12px 18px; border-top: 1px solid #eef1f5; background: #fbfcfe; }
@@ -109,10 +111,10 @@
       .gutter { background: #f7f9fc; color: #9aa4b2; font-family: ui-monospace, Consolas, monospace; font-size: 13px; line-height: 20px; padding: 10px 8px; text-align: right; user-select: none; overflow: hidden; }
       .editor-wrap textarea { flex: 1; border: none; outline: none; resize: vertical; min-height: 420px; font-family: ui-monospace, Consolas, monospace; font-size: 13px; line-height: 20px; padding: 10px 12px; tab-size: 2; }
       .field { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; }
-      .field label { font-size: 13px; color: #5a6577; }
-      .field input, .field select { padding: 8px 10px; border: 1px solid #dde3ec; border-radius: 8px; font-size: 14px; }
-      .hint { font-size: 12px; color: #8b95a5; }
-      .msg { font-size: 13px; }
+      .field label { font-size: 14px; color: #5a6577; }
+      .field input, .field select { padding: 8px 10px; border: 1px solid #dde3ec; border-radius: 8px; font-size: 15px; }
+      .hint { font-size: 13px; color: #8b95a5; }
+      .msg { font-size: 14px; }
       .msg.ok { color: #1a7f37; }
       .msg.err { color: #c0392b; }
     </style>
