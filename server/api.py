@@ -46,6 +46,7 @@ from .case_index import (
 from .game_index import create_game, delete_game, list_channels, list_games as list_game_configs
 from .causes import CATEGORIES as CAUSE_CATEGORIES
 from .causes import is_valid_category
+from .devices import discover_devices
 from .runner import BusyError, runner
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -178,6 +179,23 @@ def health() -> dict[str, Any]:
         "report_root_exists": REPORT_ROOT.exists(),
         "runner": runner.snapshot(),
     }
+
+
+# 设备列表要频繁刷新，但 adb devices 有几十到上百毫秒开销，做 5 秒缓存
+_DEVICE_CACHE: dict[str, Any] = {"at": 0.0, "devices": []}
+_DEVICE_CACHE_TTL = 5.0
+
+
+@app.get("/api/devices")
+def devices() -> dict[str, Any]:
+    """当前连接的 Android 设备（USB 与 WiFi 一视同仁）。"""
+    import time
+
+    now = time.time()
+    if now - _DEVICE_CACHE["at"] > _DEVICE_CACHE_TTL:
+        _DEVICE_CACHE["devices"] = [device.to_dict() for device in discover_devices()]
+        _DEVICE_CACHE["at"] = now
+    return {"devices": _DEVICE_CACHE["devices"], "count": len(_DEVICE_CACHE["devices"])}
 
 
 @app.get("/api/runs")

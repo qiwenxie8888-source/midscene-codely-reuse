@@ -18,6 +18,7 @@ const state = {
   activeGame: null, // null = 全部用例视图（只读，不能运行）
   flake: new Map(), // 「游戏|文件名」→ 稳定性统计（来自 /api/cases/flake）
   flakeWindow: 10,
+  devices: [], // 当前连接的设备（只读展示）
   jobId: null,
   startedAt: null,
   timer: null,
@@ -50,14 +51,16 @@ async function api(path, options) {
 
 async function load() {
   // 用例列表用于渲染具体文件；游戏树用于渲染左侧渠道/游戏（含还没有任何用例的空游戏）；
-  // flake 统计用于行内稳定性列与顶部提示条——它挂了也不该让整个列表打不开
-  const [cases, tree, flake] = await Promise.all([
+  // flake 统计用于行内稳定性列与顶部提示条；设备列表只做状态展示
+  const [cases, tree, flake, devices] = await Promise.all([
     api('/api/cases'),
     api('/api/game-tree'),
     api(`/api/cases/flake?last=${state.flakeWindow}`).catch(() => ({ items: [] })),
+    api('/api/devices').catch(() => ({ devices: [] })),
   ]);
   state.items = cases.items || [];
   state.tree = tree.channels || [];
+  state.devices = devices.devices || [];
   state.flake = new Map();
   for (const entry of flake.items || []) {
     const key = flakeKey(entry.game_key, entry.source_path);
@@ -128,12 +131,56 @@ function render() {
   const notice = flakeNotice(games);
   if (notice) host.appendChild(notice);
 
+  const devices = deviceBar();
+  if (devices) host.appendChild(devices);
+
   for (const game of currentScope()) {
     for (const suite of ['smoke', 'explore']) {
       const items = game.items.filter((item) => item.suite === suite);
       host.appendChild(suiteBlock(game, suite, items));
     }
   }
+}
+
+/**
+ * 设备状态条：只读展示，不做设备选择。
+ * 任务由调度器分配，用户不需要知道设备拓扑；这里只是让"现在有几台、在忙什么"可见。
+ */
+function deviceBar() {
+  const devices = state.devices || [];
+  if (!devices.length) return null;
+
+  const bar = document.createElement('div');
+  bar.className = 'device-bar';
+  const label = document.createElement('span');
+  label.className = 'device-label';
+  const idle = devices.filter((device) => device.status === 'idle').length;
+  label.textContent = `设备 ${devices.length} 台（空闲 ${idle}）`;
+  bar.appendChild(label);
+
+  for (const device of devices) {
+    const chip = document.createElement('span');
+    chip.className = `device-chip ${device.status}`;
+    const dot = document.createElement('i');
+    dot.className = 'dot';
+    chip.appendChild(dot);
+
+    const text = document.createElement('span');
+    const gameName = device.game_key ? device.game_key.split('/').pop() : '';
+    text.textContent =
+      device.status === 'busy' && gameName
+        ? `${device.alias} · ${gameName}`
+        : device.status === 'offline'
+          ? `${device.alias} · 离线`
+          : device.alias;
+    chip.appendChild(text);
+
+    chip.title = [device.serial, device.account ? `测试号 ${device.account}` : null]
+      .filter(Boolean)
+      .join(' · ');
+    bar.appendChild(chip);
+  }
+  return bar;
 }
 
 /**

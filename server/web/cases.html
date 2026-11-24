@@ -70,6 +70,14 @@
       .flake-notice .chip .file { font-family: ui-monospace, Consolas, monospace; color: #7a3d36; }
       .flake-notice .chip b { color: #c0392b; font-weight: 600; }
       .flake-notice .notice-error { font-size: 12px; color: #c0392b; white-space: nowrap; }
+      /* 设备状态条：只读，不提供设备选择 */
+      .device-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; font-size: 12px; color: #6b7688; }
+      .device-bar .device-label { font-weight: 600; color: #45526b; }
+      .device-chip { display: inline-flex; align-items: center; gap: 6px; background: #fff; border: 1px solid #e5e8ee; border-radius: 999px; padding: 3px 10px; font-size: 12px; color: #45526b; }
+      .device-chip .dot { width: 6px; height: 6px; border-radius: 50%; background: #34a853; }
+      .device-chip.busy .dot { background: #e8a33d; }
+      .device-chip.offline { color: #9aa4b2; background: #f7f9fc; }
+      .device-chip.offline .dot { background: #c0c6cf; }
       /* 定位后高亮：行本来就在视口里时滚动没有变化，靠这一下告诉用户"就是这条" */
       .case-row.flash { animation: case-flash 1.8s ease-out; }
       @keyframes case-flash {
