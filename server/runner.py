@@ -94,9 +94,14 @@ class RunJob:
 
 
 class Runner:
-    """单线程执行器：一个 worker 顺序消费队列。"""
+    """单槽执行器：一个 worker 顺序消费队列。
 
-    def __init__(self) -> None:
+    device_serial 为空时沿用父进程的 ANDROID_DEVICE_ID（单设备模式）；
+    由 DevicePool 创建时每台设备一个实例，各自绑定自己的 serial。
+    """
+
+    def __init__(self, device_serial: str | None = None) -> None:
+        self.device_serial = device_serial
         self._jobs: dict[str, RunJob] = {}
         self._queue: deque[str] = deque()
         self._lock = threading.RLock()
@@ -113,13 +118,17 @@ class Runner:
         files: list[str],
         clean: bool = True,
         game_key: str | None = None,
+        run_id: str | None = None,
     ) -> RunJob:
         with self._lock:
             waiting = [jid for jid in self._queue if self._jobs[jid].status == "queued"]
             if len(waiting) >= MAX_QUEUE:
                 raise BusyError(f"队列已满（最多排队 {MAX_QUEUE} 个）")
 
-            run_id = time.strftime("%Y%m%dT%H%M%S") + "-" + uuid.uuid4().hex[:4]
+            # DevicePool 会预生成 run_id，保证排队期间就有稳定的任务标识
+            run_id = run_id or (
+                time.strftime("%Y%m%dT%H%M%S") + "-" + uuid.uuid4().hex[:4]
+            )
             job = RunJob(run_id=run_id, project=project, files=files, clean=clean, game_key=game_key)
             # 未指定文件即整包模式；指定了则等 _build_args 按"是否全选"再定
             job.mode = "project" if not files else "files"
@@ -201,6 +210,7 @@ class Runner:
             running = [j.to_dict() for j in self._jobs.values() if j.status == "running"]
             queued = [j.to_dict() for j in self._jobs.values() if j.status == "queued"]
             return {
+                "device_serial": self.device_serial,
                 "running": running[0] if running else None,
                 "running_count": len(running),
                 "queued": queued,
@@ -285,6 +295,11 @@ class Runner:
         # NODE_ENV=production 会让 pnpm 跳装 devDependencies，子进程必须抹掉
         env.pop("NODE_ENV", None)
         env["PYTHONUNBUFFERED"] = "1"
+        # 多设备模式下每个 Runner 绑定一台设备，必须显式覆盖父进程里的旧值
+        if self.device_serial:
+            env["ANDROID_DEVICE_ID"] = self.device_serial
+            # 清理脚本据此只处理本任务的进程，避免并行时互杀
+            env["CODELY_TASK_ID"] = job.run_id
 
         args = self._build_args(job)
         job.result_snapshot = self._snapshot_runs()

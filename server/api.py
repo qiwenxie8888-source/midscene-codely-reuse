@@ -47,10 +47,28 @@ from .game_index import create_game, delete_game, list_channels, list_games as l
 from .causes import CATEGORIES as CAUSE_CATEGORIES
 from .causes import is_valid_category
 from .devices import discover_devices
-from .runner import BusyError, runner
+from .pool import DevicePool
+from .runner import BusyError
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DB_PATH = PROJECT_ROOT / "server" / "data" / "smoke.db"
+
+# 设备池：每台设备一个 Runner，任务按空闲设备分配；没有设备时任务排队等待
+pool = DevicePool(discover_devices())
+
+# 设备列表要频繁刷新，但 adb devices 有几十到上百毫秒开销，做 5 秒缓存
+_DEVICE_CACHE: dict[str, Any] = {"at": 0.0}
+_DEVICE_CACHE_TTL = 5.0
+
+
+def refresh_pool(force: bool = False) -> None:
+    """刷新设备池。起任务时必须 force，保证新接上的设备参与调度。"""
+    import time
+
+    now = time.time()
+    if force or now - _DEVICE_CACHE["at"] > _DEVICE_CACHE_TTL:
+        pool.refresh(discover_devices())
+        _DEVICE_CACHE["at"] = now
 REPORT_ROOT = (PROJECT_ROOT / "midscene_run" / "report").resolve()
 
 app = FastAPI(title="game-smoke API", version="0.1.0")
@@ -177,25 +195,16 @@ def health() -> dict[str, Any]:
         "cases": cases,
         "report_root": str(REPORT_ROOT),
         "report_root_exists": REPORT_ROOT.exists(),
-        "runner": runner.snapshot(),
+        "runner": pool.snapshot(),
     }
-
-
-# 设备列表要频繁刷新，但 adb devices 有几十到上百毫秒开销，做 5 秒缓存
-_DEVICE_CACHE: dict[str, Any] = {"at": 0.0, "devices": []}
-_DEVICE_CACHE_TTL = 5.0
 
 
 @app.get("/api/devices")
 def devices() -> dict[str, Any]:
     """当前连接的 Android 设备（USB 与 WiFi 一视同仁）。"""
-    import time
-
-    now = time.time()
-    if now - _DEVICE_CACHE["at"] > _DEVICE_CACHE_TTL:
-        _DEVICE_CACHE["devices"] = [device.to_dict() for device in discover_devices()]
-        _DEVICE_CACHE["at"] = now
-    return {"devices": _DEVICE_CACHE["devices"], "count": len(_DEVICE_CACHE["devices"])}
+    refresh_pool()
+    snapshot = pool.snapshot()
+    return {"devices": snapshot["devices"], "count": len(snapshot["devices"])}
 
 
 @app.get("/api/runs")
@@ -1020,19 +1029,19 @@ def start_run(payload: StartRunRequest) -> dict[str, Any]:
         # 只跑该游戏的用例，杜绝跨游戏混跑导致的状态污染
         if files and any(not item.startswith(f"games/{game_key}/") for item in files):
             raise HTTPException(status_code=400, detail=f"文件不属于游戏 {game_key}")
+    refresh_pool(force=True)
     try:
-        job = runner.start(payload.project, files, payload.clean, game_key)
+        item = pool.start(payload.project, files, payload.clean, game_key)
     except BusyError as error:
-        snapshot = runner.snapshot()
+        snapshot = pool.snapshot()
         raise HTTPException(
             status_code=409,
             detail={
                 "message": str(error),
-                "running_run_id": (snapshot["running"] or {}).get("run_id"),
                 "queue_depth": snapshot["queue_depth"],
             },
         ) from error
-    return job.to_dict()
+    return item.to_dict()
 
 
 @app.get("/api/runs/{run_id}/events")
@@ -1041,12 +1050,13 @@ def stream_run_events(
     from_seq: int = Query(0, alias="from", ge=0, description="从哪个序号开始补历史"),
 ) -> StreamingResponse:
     """SSE 实时日志。断线重连带 from 就能补回历史，不会丢前面的行。"""
-    if runner.get(run_id) is None:
+    task_runner = pool.runner_for(run_id)
+    if task_runner is None or task_runner.get(run_id) is None:
         raise HTTPException(status_code=404, detail=f"任务不存在：{run_id}")
 
     def generate():
         try:
-            for seq, event in runner.iter_events(run_id, from_seq):
+            for seq, event in task_runner.iter_events(run_id, from_seq):
                 if event.get("type") == "heartbeat":
                     # SSE 注释行，只为保活，客户端会忽略
                     yield ": ping\n\n"
@@ -1069,8 +1079,11 @@ def run_log(
     from_seq: int = Query(0, alias="from", ge=0),
 ) -> dict[str, Any]:
     """轮询式取日志：SSE 不可用或被中间层掐断时的兜底。"""
+    task_runner = pool.runner_for(run_id)
+    if task_runner is None:
+        raise HTTPException(status_code=404, detail=f"任务不存在：{run_id}")
     try:
-        items, last_seq, status = runner.log_slice(run_id, from_seq)
+        items, last_seq, status = task_runner.log_slice(run_id, from_seq)
     except KeyError as error:
         raise HTTPException(status_code=404, detail=f"任务不存在：{run_id}") from error
     return {"items": items, "next": last_seq, "status": status}
@@ -1080,13 +1093,13 @@ def run_log(
 def cancel_run(run_id: str) -> dict[str, Any]:
     """取消：排队中直接出队；运行中杀进程树（含 codely 子进程）。"""
     try:
-        was = runner.cancel(run_id)
+        was = pool.cancel(run_id)
     except KeyError as error:
         raise HTTPException(status_code=404, detail=f"任务不存在：{run_id}") from error
     except ValueError as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
-    job = runner.get(run_id)
-    return {"run_id": run_id, "was": was, "status": job.status if job else "unknown"}
+    job = pool.get(run_id)
+    return {"run_id": run_id, "was": was, "status": getattr(job, "status", "unknown")}
 
 
 if REPORT_ROOT.exists():
