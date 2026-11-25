@@ -21,12 +21,17 @@ const isWindows = process.platform === 'win32';
 const dryRun = process.argv.includes('--dry-run');
 
 function listOrphanProcesses() {
+  // 只清「父进程已经不在了」的 codely。
+  // 并行跑多个任务时，另一个任务的 node 还活着，它的 codely 不是孤儿，
+  // 按标记一刀切会把别人正在用的会话杀掉。
   if (isWindows) {
     const script = [
-      `Get-CimInstance Win32_Process -Filter "Name='codely.exe'"`,
-      `| Where-Object { $_.CommandLine -like '*${MARKER}*' }`,
-      '| Select-Object -ExpandProperty ProcessId',
-    ].join(' ');
+      '$all = Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name,CommandLine',
+      `$targets = $all | Where-Object { $_.Name -eq 'codely.exe' -and $_.CommandLine -like '*${MARKER}*' }`,
+      'foreach ($p in $targets) {',
+      '  if (-not ($all | Where-Object { $_.ProcessId -eq $p.ParentProcessId })) { $p.ProcessId }',
+      '}',
+    ].join('\n');
     const result = spawnSync(
       'powershell',
       ['-NoProfile', '-NonInteractive', '-Command', script],
@@ -37,12 +42,19 @@ function listOrphanProcesses() {
       .map((line) => Number.parseInt(line.trim(), 10))
       .filter((pid) => Number.isInteger(pid) && pid > 0);
   }
-  const result = spawnSync('ps', ['-eo', 'pid=,args='], { encoding: 'utf8' });
-  return (result.stdout ?? '')
+
+  const result = spawnSync('ps', ['-eo', 'pid=,ppid=,args='], { encoding: 'utf8' });
+  const rows = (result.stdout ?? '')
     .split('\n')
-    .filter((line) => line.includes(MARKER))
-    .map((line) => Number.parseInt(line.trim().split(/\s+/)[0], 10))
-    .filter((pid) => Number.isInteger(pid) && pid > 0);
+    .map((line) => {
+      const match = line.trim().match(/^(\d+)\s+(\d+)\s+(.*)$/);
+      return match ? { pid: Number(match[1]), ppid: Number(match[2]), args: match[3] } : null;
+    })
+    .filter(Boolean);
+  const alive = new Set(rows.map((row) => row.pid));
+  return rows
+    .filter((row) => row.args.includes(MARKER) && (row.ppid === 1 || !alive.has(row.ppid)))
+    .map((row) => row.pid);
 }
 
 function listWorkspaceDirs() {
